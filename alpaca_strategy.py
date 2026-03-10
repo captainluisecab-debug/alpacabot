@@ -1,15 +1,15 @@
 """
-alpaca_strategy.py — Swing trading signals for stocks.
+alpaca_strategy.py — Swing trading signals for stocks. AGGRESSIVE PAPER MODE.
 
-BUY conditions (all must be true):
-  - RSI(14) < 40  (oversold dip)
-  - Price ≤ EMA(20) * 1.01  (at or below 20-day average)
-  - Last bar closed down (dip confirmed)
+BUY conditions — 3 entry types:
+  ENTRY 1 — Dip buy:        RSI < 55 (no EMA required)
+  ENTRY 2 — EMA crossover:  price just crossed above EMA + RSI <= 65
+  ENTRY 3 — Trend ride:     2 green bars + price above EMA + RSI 45-68
 
-SELL conditions (any is enough):
-  - RSI(14) > 62  (overbought, take profit)
-  - Open P&L ≥ TAKE_PROFIT_PCT
-  - Open P&L ≤ -STOP_LOSS_PCT
+SELL conditions:
+  - RSI > 72 + price below EMA (trail exit)
+  - Open P&L >= TAKE_PROFIT_PCT
+  - Open P&L <= -STOP_LOSS_PCT
 
 HOLD: everything else.
 """
@@ -45,6 +45,9 @@ def compute_signal(
     def sig(action: str, reason: str) -> Signal:
         return Signal(action, sym, price, rsi, ema, reason)
 
+    closes = [b.close for b in bars]
+    gap_pct = (price - ema) / ema * 100 if ema > 0 else 0.0
+
     # ── Exit logic (position open) ──────────────────────────────────
     if open_position and entry_price > 0:
         pnl_pct = (price - entry_price) / entry_price * 100
@@ -55,18 +58,28 @@ def compute_signal(
         if pnl_pct >= take_profit_pct:
             return sig("SELL", f"take_profit {pnl_pct:.1f}%")
 
-        # Trailing: RSI overbought AND price back below EMA → exit
-        if rsi > 62 and price < ema:
+        # Trailing: RSI extreme AND price fell back below EMA
+        if rsi > 72 and price < ema:
             return sig("SELL", f"trail_exit rsi={rsi:.1f}")
 
-    # ── Entry logic ─────────────────────────────────────────────────
+    # ── Entry logic — AGGRESSIVE ────────────────────────────────────
     if not open_position:
-        closes = [b.close for b in bars]
-        at_or_below_ema = price <= ema * 1.01
-        dipping = len(closes) >= 2 and closes[-1] <= closes[-2]
 
-        if rsi < 40 and at_or_below_ema and dipping:
-            gap = (price - ema) / ema * 100
-            return sig("BUY", f"oversold rsi={rsi:.1f} ema_gap={gap:.1f}%")
+        # ENTRY 1 — Dip buy: RSI below 55 (no EMA required)
+        if rsi < 55:
+            return sig("BUY", f"oversold rsi={rsi:.1f} gap={gap_pct:.1f}%")
+
+        # ENTRY 2 — EMA crossover: prev bar below EMA, current above, RSI <= 65
+        if len(closes) >= 2 and ema > 0:
+            prev_below = closes[-2] < ema
+            now_above  = price > ema
+            if prev_below and now_above and rsi <= 65:
+                return sig("BUY", f"ema_cross_up rsi={rsi:.1f} gap={gap_pct:.1f}%")
+
+        # ENTRY 3 — Trend ride: 2 green bars + above EMA + RSI 45-68
+        if len(closes) >= 3 and ema > 0:
+            two_green = closes[-1] > closes[-2] > closes[-3]
+            if two_green and price > ema and 45.0 <= rsi <= 68.0:
+                return sig("BUY", f"trend_ride rsi={rsi:.1f} gap={gap_pct:.1f}%")
 
     return sig("HOLD", "no_signal")
