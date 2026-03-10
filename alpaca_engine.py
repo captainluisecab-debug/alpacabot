@@ -54,7 +54,10 @@ from alpaca_brain import run_brain as brain_run, load_overrides as brain_overrid
 
 
 def _read_supervisor_cmd() -> dict:
-    cmd_path = r"C:\Projects\supervisor\commands\alpaca_cmd.json"
+    _default_cmd_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "supervisor", "commands", "alpaca_cmd.json"
+    )
+    cmd_path = os.environ.get("ALPACA_CMD_PATH", os.path.normpath(_default_cmd_path))
     defaults = {"mode": "NORMAL", "size_mult": 1.0, "entry_allowed": True}
     try:
         if os.path.exists(cmd_path):
@@ -181,10 +184,11 @@ def _run_cycle(st, cycle: int) -> None:
     equity      = float(account.equity)
     unrealized  = float(getattr(account, "unrealized_pl", 0) or 0)
 
-    # Track peak equity in state for drawdown calculation (high-water mark)
-    if not hasattr(st, "peak_equity") or equity > getattr(st, "peak_equity", 0):
+    # Track peak equity in state for drawdown calculation (high-water mark).
+    # st.peak_equity is loaded from / saved to the state file so restarts don't reset it.
+    if equity > st.peak_equity:
         st.peak_equity = equity
-    peak    = getattr(st, "peak_equity", equity)
+    peak    = st.peak_equity if st.peak_equity > 0 else equity
     dd_pct  = (equity - peak) / peak * 100 if peak > 0 else 0.0
 
     # Dynamic baseline: use peak equity as baseline so pnl% reflects drawdown from ATH
@@ -268,8 +272,12 @@ def _run_cycle(st, cycle: int) -> None:
                          cycle, sym, pnl, st.realized_pnl_usd)
                 try:
                     import sys as _sys
-                    if r"C:\Projects\supervisor" not in _sys.path:
-                        _sys.path.insert(0, r"C:\Projects\supervisor")
+                    _sup_path = os.environ.get(
+                        "SUPERVISOR_DIR",
+                        os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "supervisor"))
+                    )
+                    if _sup_path not in _sys.path:
+                        _sys.path.insert(0, _sup_path)
                     from supervisor_execution import log_execution
                     log_execution("alpaca", sym, "SELL", proceeds, fill_price, pnl, signal.reason)
                 except Exception:
@@ -324,7 +332,7 @@ def _run_cycle(st, cycle: int) -> None:
         fill = buy_notional(sym, trade_usd)
         if fill:
             fill_price = float(getattr(fill, "filled_avg_price", snap.price) or snap.price)
-            record_buy(st, sym, snap.price, trade_size_override)
+            record_buy(st, sym, fill_price, trade_usd)
             open_count += 1
             try:
                 import sys as _sys

@@ -36,6 +36,7 @@ class BotState:
     cycle: int = 0
     stop_loss_strikes: Dict[str, int] = field(default_factory=dict)
     blocked_until: Dict[str, int] = field(default_factory=dict)
+    peak_equity: float = 0.0  # high-water mark; persisted so restarts don't reset drawdown tracking
 
 
 def load_state() -> BotState:
@@ -52,6 +53,7 @@ def load_state() -> BotState:
             cycle=raw.get("cycle", 0),
             stop_loss_strikes={str(k): int(v) for k, v in (raw.get("stop_loss_strikes") or {}).items()},
             blocked_until={str(k): int(v) for k, v in (raw.get("blocked_until") or {}).items()},
+            peak_equity=float(raw.get("peak_equity", 0.0) or 0.0),
         )
         for sym, p in (raw.get("positions") or {}).items():
             st.positions[sym] = BotPosition(**p)
@@ -68,6 +70,7 @@ def save_state(st: BotState) -> None:
         "winning_trades": st.winning_trades,
         "losing_trades": st.losing_trades,
         "cycle": st.cycle,
+        "peak_equity": st.peak_equity,
         "positions": {sym: asdict(p) for sym, p in st.positions.items()},
         "stop_loss_strikes": dict(st.stop_loss_strikes),
         "blocked_until": dict(st.blocked_until),
