@@ -50,6 +50,7 @@ from alpaca_data import get_all_snapshots
 from alpaca_strategy import compute_signal
 from alpaca_broker import buy_notional, get_account, get_positions, sell_all
 from alpaca_state import load_state, record_buy, record_sell, save_state
+from alpaca_brain import run_brain as brain_run, load_overrides as brain_overrides
 
 
 def _read_supervisor_cmd() -> dict:
@@ -146,6 +147,13 @@ def _is_market_open() -> bool:
 
 def _run_cycle(st, cycle: int) -> None:
     st.cycle = cycle
+
+    # ── Brain overrides — load every cycle, run brain every 10 ─────
+    overrides    = brain_overrides()
+    stop_loss    = overrides.get("STOP_LOSS_PCT",   STOP_LOSS_PCT)
+    take_profit  = overrides.get("TAKE_PROFIT_PCT", TAKE_PROFIT_PCT)
+    trade_size   = overrides.get("TRADE_SIZE_USD",  TRADE_SIZE_USD)
+    max_pos      = int(overrides.get("MAX_POSITIONS", MAX_POSITIONS))
 
     # ── Supervisor command ──────────────────────────────────────────
     cmd       = _read_supervisor_cmd()
@@ -253,9 +261,19 @@ def _run_cycle(st, cycle: int) -> None:
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
             fill = sell_all(sym)
             if fill:
+                fill_price = float(getattr(fill, "filled_avg_price", snap.price) or snap.price)
+                proceeds = pos.usd_invested  # approximate; record_sell computes true pnl
                 pnl = record_sell(st, sym, snap.price, reason=signal.reason)
                 log.info("[CYCLE %d] %s sold | pnl=$%.2f | realized_total=$%.2f",
                          cycle, sym, pnl, st.realized_pnl_usd)
+                try:
+                    import sys as _sys
+                    if r"C:\Projects\supervisor" not in _sys.path:
+                        _sys.path.insert(0, r"C:\Projects\supervisor")
+                    from supervisor_execution import log_execution
+                    log_execution("alpaca", sym, "SELL", proceeds, fill_price, pnl, signal.reason)
+                except Exception:
+                    pass
 
     # ── BUY loop — find new entries ─────────────────────────────────
     open_count = len(st.positions)
@@ -305,8 +323,17 @@ def _run_cycle(st, cycle: int) -> None:
                  cycle, sym, snap.price, snap.rsi, signal.reason, trade_usd, sup_mode)
         fill = buy_notional(sym, trade_usd)
         if fill:
+            fill_price = float(getattr(fill, "filled_avg_price", snap.price) or snap.price)
             record_buy(st, sym, snap.price, trade_size_override)
             open_count += 1
+            try:
+                import sys as _sys
+                if r"C:\Projects\supervisor" not in _sys.path:
+                    _sys.path.insert(0, r"C:\Projects\supervisor")
+                from supervisor_execution import log_execution
+                log_execution("alpaca", sym, "BUY", trade_usd, fill_price, 0.0, signal.reason)
+            except Exception:
+                pass
 
     save_state(st)
 
