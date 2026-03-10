@@ -169,10 +169,28 @@ def _run_cycle(st, cycle: int) -> None:
         log.error("[CYCLE %d] Could not fetch account — skipping", cycle)
         return
 
-    cash   = float(account.cash)
-    equity = float(account.equity)
-    log.info("[CYCLE %d] equity=$%.2f cash=$%.2f positions=%d",
-             cycle, equity, cash, len(st.positions))
+    cash        = float(account.cash)
+    equity      = float(account.equity)
+    baseline    = float(os.environ.get("ALPACA_BASELINE", "500"))
+    unrealized  = float(getattr(account, "unrealized_pl", 0) or 0)
+    pnl_pct     = (equity - baseline) / baseline * 100 if baseline > 0 else 0.0
+
+    # Track peak equity in state for drawdown calculation
+    if not hasattr(st, "peak_equity") or equity > getattr(st, "peak_equity", 0):
+        st.peak_equity = equity
+    peak    = getattr(st, "peak_equity", equity)
+    dd_pct  = (equity - peak) / peak * 100 if peak > 0 else 0.0
+
+    win_rate = (st.winning_trades / st.total_trades * 100
+                if st.total_trades > 0 else 0.0)
+
+    log.info(
+        "[CYCLE %d] equity=$%.2f pnl=$%+.2f (%.1f%%) dd=%.2f%% | "
+        "cash=$%.2f open=%d | realized=$%+.2f trades=%d win=%.0f%%",
+        cycle, equity, equity - baseline, pnl_pct, dd_pct,
+        cash, len(st.positions), st.realized_pnl_usd,
+        st.total_trades, win_rate,
+    )
 
     # ── Fetch live positions from Alpaca ────────────────────────────
     live_positions = get_positions()
@@ -182,6 +200,21 @@ def _run_cycle(st, cycle: int) -> None:
         if sym not in live_positions:
             log.warning("[SYNC] %s not in Alpaca positions — removing from local state", sym)
             st.positions.pop(sym)
+
+    # ── Log open positions with live P&L ────────────────────────────
+    if st.positions:
+        for sym, pos in st.positions.items():
+            live = live_positions.get(sym)
+            if live:
+                live_price  = float(getattr(live, "current_price", pos.entry_price) or pos.entry_price)
+                pos_pnl_pct = (live_price - pos.entry_price) / pos.entry_price * 100
+                pos_pnl_usd = pos_pnl_pct / 100 * pos.usd_invested
+                log.info(
+                    "  [POS] %-6s entry=$%.2f now=$%.2f pnl=$%+.2f (%+.1f%%)",
+                    sym, pos.entry_price, live_price, pos_pnl_usd, pos_pnl_pct,
+                )
+            else:
+                log.info("  [POS] %-6s entry=$%.2f (no live price)", sym, pos.entry_price)
 
     # ── Fetch market data + compute signals ─────────────────────────
     snapshots = get_all_snapshots(UNIVERSE)
