@@ -171,15 +171,17 @@ def _run_cycle(st, cycle: int) -> None:
 
     cash        = float(account.cash)
     equity      = float(account.equity)
-    baseline    = float(os.environ.get("ALPACA_BASELINE", "500"))
     unrealized  = float(getattr(account, "unrealized_pl", 0) or 0)
-    pnl_pct     = (equity - baseline) / baseline * 100 if baseline > 0 else 0.0
 
-    # Track peak equity in state for drawdown calculation
+    # Track peak equity in state for drawdown calculation (high-water mark)
     if not hasattr(st, "peak_equity") or equity > getattr(st, "peak_equity", 0):
         st.peak_equity = equity
     peak    = getattr(st, "peak_equity", equity)
     dd_pct  = (equity - peak) / peak * 100 if peak > 0 else 0.0
+
+    # Dynamic baseline: use peak equity as baseline so pnl% reflects drawdown from ATH
+    baseline = peak if peak > 0 else equity
+    pnl_pct  = (equity - baseline) / baseline * 100 if baseline > 0 else 0.0
 
     win_rate = (st.winning_trades / st.total_trades * 100
                 if st.total_trades > 0 else 0.0)
@@ -191,6 +193,19 @@ def _run_cycle(st, cycle: int) -> None:
         cash, len(st.positions), st.realized_pnl_usd,
         st.total_trades, win_rate,
     )
+
+    # ── Drawdown guard — scale or pause entries based on dd_pct ─────
+    entry_size_from_dd: float
+    if dd_pct <= -8.0:
+        entry_ok = False
+        entry_size_from_dd = TRADE_SIZE_USD
+        log.warning("[CYCLE %d] DD guard: portfolio dd=%.1f%% — entries paused", cycle, dd_pct)
+    elif dd_pct <= -5.0:
+        entry_size_from_dd = TRADE_SIZE_USD * 0.5
+        log.info("[CYCLE %d] DD guard: portfolio dd=%.1f%% — half size", cycle, dd_pct)
+    else:
+        entry_size_from_dd = TRADE_SIZE_USD
+    trade_size_override = entry_size_from_dd
 
     # ── Fetch live positions from Alpaca ────────────────────────────
     live_positions = get_positions()
@@ -238,7 +253,7 @@ def _run_cycle(st, cycle: int) -> None:
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
             fill = sell_all(sym)
             if fill:
-                pnl = record_sell(st, sym, snap.price)
+                pnl = record_sell(st, sym, snap.price, reason=signal.reason)
                 log.info("[CYCLE %d] %s sold | pnl=$%.2f | realized_total=$%.2f",
                          cycle, sym, pnl, st.realized_pnl_usd)
 
@@ -271,7 +286,17 @@ def _run_cycle(st, cycle: int) -> None:
             break
         if not entry_ok:
             break
-        trade_usd = TRADE_SIZE_USD * size_mult
+        # Stop-loss strike block: skip if symbol is blocked this cycle
+        if sym in st.blocked_until and cycle < st.blocked_until[sym]:
+            log.info("[CYCLE %d] %s blocked until cycle %d (stop_loss strikes) — skipping",
+                     cycle, sym, st.blocked_until[sym])
+            continue
+        elif sym in st.blocked_until and cycle >= st.blocked_until[sym]:
+            # Block has expired — clean up
+            st.blocked_until.pop(sym, None)
+            st.stop_loss_strikes.pop(sym, None)
+
+        trade_usd = trade_size_override * size_mult
         available_cash = cash - CASH_RESERVE_USD - (open_count * trade_usd)
         if available_cash < trade_usd:
             break
@@ -280,7 +305,7 @@ def _run_cycle(st, cycle: int) -> None:
                  cycle, sym, snap.price, snap.rsi, signal.reason, trade_usd, sup_mode)
         fill = buy_notional(sym, trade_usd)
         if fill:
-            record_buy(st, sym, snap.price, TRADE_SIZE_USD)
+            record_buy(st, sym, snap.price, trade_size_override)
             open_count += 1
 
     save_state(st)
