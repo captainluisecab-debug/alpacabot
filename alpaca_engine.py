@@ -206,13 +206,13 @@ def _run_cycle(st, cycle: int) -> None:
     entry_size_from_dd: float
     if dd_pct <= -8.0:
         entry_ok = False
-        entry_size_from_dd = TRADE_SIZE_USD
+        entry_size_from_dd = trade_size
         log.warning("[CYCLE %d] DD guard: portfolio dd=%.1f%% — entries paused", cycle, dd_pct)
     elif dd_pct <= -5.0:
-        entry_size_from_dd = TRADE_SIZE_USD * 0.5
+        entry_size_from_dd = trade_size * 0.5
         log.info("[CYCLE %d] DD guard: portfolio dd=%.1f%% — half size", cycle, dd_pct)
     else:
-        entry_size_from_dd = TRADE_SIZE_USD
+        entry_size_from_dd = trade_size
     trade_size_override = entry_size_from_dd
 
     # ── Fetch live positions from Alpaca ────────────────────────────
@@ -254,8 +254,8 @@ def _run_cycle(st, cycle: int) -> None:
             snap,
             open_position=True,
             entry_price=pos.entry_price,
-            stop_loss_pct=STOP_LOSS_PCT,
-            take_profit_pct=TAKE_PROFIT_PCT,
+            stop_loss_pct=stop_loss,
+            take_profit_pct=take_profit,
         )
         if signal.action == "SELL":
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
@@ -277,12 +277,12 @@ def _run_cycle(st, cycle: int) -> None:
 
     # ── BUY loop — find new entries ─────────────────────────────────
     open_count = len(st.positions)
-    if open_count >= MAX_POSITIONS:
-        log.info("[CYCLE %d] Max positions (%d) reached — no new buys", cycle, MAX_POSITIONS)
+    if open_count >= max_pos:
+        log.info("[CYCLE %d] Max positions (%d) reached — no new buys", cycle, max_pos)
         return
 
     available_cash = cash - CASH_RESERVE_USD
-    if available_cash < TRADE_SIZE_USD:
+    if available_cash < trade_size:
         log.info("[CYCLE %d] Insufficient cash ($%.2f) for new position", cycle, available_cash)
         return
 
@@ -292,15 +292,15 @@ def _run_cycle(st, cycle: int) -> None:
         if sym in st.positions:
             continue  # already holding
         signal = compute_signal(snap, open_position=False,
-                                stop_loss_pct=STOP_LOSS_PCT,
-                                take_profit_pct=TAKE_PROFIT_PCT)
+                                stop_loss_pct=stop_loss,
+                                take_profit_pct=take_profit)
         if signal.action == "BUY":
             candidates.append((snap.rsi, sym, snap, signal))
 
     candidates.sort(key=lambda x: x[0])  # most oversold first
 
     for _, sym, snap, signal in candidates:
-        if open_count >= MAX_POSITIONS:
+        if open_count >= max_pos:
             break
         if not entry_ok:
             break
@@ -334,6 +334,15 @@ def _run_cycle(st, cycle: int) -> None:
                 log_execution("alpaca", sym, "BUY", trade_usd, fill_price, 0.0, signal.reason)
             except Exception:
                 pass
+
+    # ── Brain — self-tune parameters every 10 cycles ────────────────
+    if cycle % 10 == 0:
+        positions_str = ", ".join(
+            f"{sym}@${pos.entry_price:.2f}" for sym, pos in st.positions.items()
+        ) or "none"
+        # Expose live equity/peak on state so brain can read them
+        st.equity = equity
+        brain_run(st, cycle, positions_str)
 
     save_state(st)
 
