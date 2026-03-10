@@ -11,11 +11,12 @@ Run:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ── Logging setup ───────────────────────────────────────────────────
 os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"), exist_ok=True)
@@ -51,6 +52,74 @@ from alpaca_broker import buy_notional, get_account, get_positions, sell_all
 from alpaca_state import load_state, record_buy, record_sell, save_state
 
 
+def _read_supervisor_cmd() -> dict:
+    cmd_path = r"C:\Projects\supervisor\commands\alpaca_cmd.json"
+    defaults = {"mode": "NORMAL", "size_mult": 1.0, "entry_allowed": True}
+    try:
+        if os.path.exists(cmd_path):
+            with open(cmd_path, encoding="utf-8") as f:
+                return {**defaults, **json.load(f)}
+    except Exception:
+        pass
+    return defaults
+
+
+def _get_next_open() -> float:
+    """
+    Return seconds until next market open.
+    Uses Alpaca clock API. Falls back to a rough calculation.
+    """
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca_settings import ALPACA_SECRET_KEY
+        client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY,
+                               paper=(TRADE_MODE == "PAPER"))
+        clock = client.get_clock()
+        if clock.is_open:
+            return 0.0
+        next_open = clock.next_open  # datetime
+        now       = datetime.now(timezone.utc)
+        secs      = (next_open - now).total_seconds()
+        return max(0.0, secs)
+    except Exception:
+        # Rough fallback: sleep until 9:25 AM ET next weekday
+        now = datetime.now(timezone.utc)
+        et_offset = timedelta(hours=4)   # EDT approximation
+        now_et = now - et_offset
+        target_et = now_et.replace(hour=9, minute=25, second=0, microsecond=0)
+        if target_et <= now_et:
+            target_et += timedelta(days=1)
+        # Skip weekends
+        while target_et.weekday() >= 5:
+            target_et += timedelta(days=1)
+        return (target_et - now_et).total_seconds()
+
+
+def _after_hours_monitor() -> None:
+    """
+    Read-only after-hours overview. Logs extended-hours prices for universe.
+    No trades executed. Just visibility into what is moving overnight.
+    """
+    log.info("[AFTER-HOURS] Monitoring extended hours prices (no trading)")
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockLatestQuoteRequest
+        from alpaca_settings import ALPACA_SECRET_KEY
+
+        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        req    = StockLatestQuoteRequest(symbol_or_symbols=UNIVERSE)
+        quotes = client.get_stock_latest_quote(req)
+
+        for sym in UNIVERSE:
+            q = quotes.get(sym)
+            if q:
+                mid = (float(q.ask_price) + float(q.bid_price)) / 2 if q.ask_price and q.bid_price else 0
+                log.info("[AFTER-HOURS] %-6s bid=%.2f ask=%.2f mid=%.2f",
+                         sym, float(q.bid_price or 0), float(q.ask_price or 0), mid)
+    except Exception as exc:
+        log.warning("[AFTER-HOURS] Quote fetch failed: %s", exc)
+
+
 def _is_market_open() -> bool:
     """Check if US stock market is currently open via Alpaca clock endpoint."""
     try:
@@ -77,6 +146,17 @@ def _is_market_open() -> bool:
 
 def _run_cycle(st, cycle: int) -> None:
     st.cycle = cycle
+
+    # ── Supervisor command ──────────────────────────────────────────
+    cmd       = _read_supervisor_cmd()
+    sup_mode  = cmd.get("mode", "NORMAL")
+    size_mult = float(cmd.get("size_mult", 1.0))
+    entry_ok  = bool(cmd.get("entry_allowed", True))
+    if sup_mode == "DEFENSE":
+        log.info("[CYCLE %d] Supervisor: DEFENSE — no new entries", cycle)
+        entry_ok = False
+    elif sup_mode == "SCOUT":
+        size_mult = min(size_mult, 0.5)
 
     # ── Market hours check ──────────────────────────────────────────
     if not _is_market_open():
@@ -156,13 +236,16 @@ def _run_cycle(st, cycle: int) -> None:
     for _, sym, snap, signal in candidates:
         if open_count >= MAX_POSITIONS:
             break
-        available_cash = cash - CASH_RESERVE_USD - (open_count * TRADE_SIZE_USD)
-        if available_cash < TRADE_SIZE_USD:
+        if not entry_ok:
+            break
+        trade_usd = TRADE_SIZE_USD * size_mult
+        available_cash = cash - CASH_RESERVE_USD - (open_count * trade_usd)
+        if available_cash < trade_usd:
             break
 
-        log.info("[CYCLE %d] BUY %s @ $%.2f | rsi=%.1f reason=%s",
-                 cycle, sym, snap.price, snap.rsi, signal.reason)
-        fill = buy_notional(sym, TRADE_SIZE_USD)
+        log.info("[CYCLE %d] BUY %s @ $%.2f | rsi=%.1f reason=%s (size=$%.0f sup=%s)",
+                 cycle, sym, snap.price, snap.rsi, signal.reason, trade_usd, sup_mode)
+        fill = buy_notional(sym, trade_usd)
         if fill:
             record_buy(st, sym, snap.price, TRADE_SIZE_USD)
             open_count += 1
@@ -186,11 +269,34 @@ def main() -> None:
 
     st = load_state()
     cycle = st.cycle
+    after_hours_logged = False
 
     while True:
         cycle += 1
         try:
+            # ── Smart sleep when market is closed ───────────────────
+            secs_to_open = _get_next_open()
+            if secs_to_open > 0:
+                # After-hours monitor — run once per closed session
+                if not after_hours_logged:
+                    _after_hours_monitor()
+                    after_hours_logged = True
+
+                wake_buffer = 300  # wake 5 min before open
+                sleep_secs  = max(60, secs_to_open - wake_buffer)
+                wake_time   = datetime.now(timezone.utc) + timedelta(seconds=sleep_secs)
+                log.info(
+                    "Market closed. Next open in %.1fh — sleeping until %s",
+                    secs_to_open / 3600,
+                    wake_time.strftime("%H:%M UTC"),
+                )
+                time.sleep(sleep_secs)
+                continue
+
+            # Market is open
+            after_hours_logged = False
             _run_cycle(st, cycle)
+
         except KeyboardInterrupt:
             raise
         except Exception as exc:
