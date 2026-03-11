@@ -267,7 +267,7 @@ def _run_cycle(st, cycle: int) -> None:
             if fill:
                 fill_price = float(getattr(fill, "filled_avg_price", snap.price) or snap.price)
                 proceeds = pos.usd_invested  # approximate; record_sell computes true pnl
-                pnl = record_sell(st, sym, snap.price, reason=signal.reason)
+                pnl = record_sell(st, sym, fill_price, reason=signal.reason)
                 log.info("[CYCLE %d] %s sold | pnl=$%.2f | realized_total=$%.2f",
                          cycle, sym, pnl, st.realized_pnl_usd)
                 try:
