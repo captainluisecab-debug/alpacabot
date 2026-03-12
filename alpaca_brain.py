@@ -80,10 +80,18 @@ Only include parameters that need changing. Empty changes={{}} means no change n
         client = anthropic.Anthropic()
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=256,
             messages=[{"role": "user", "content": prompt}]
         )
         raw = resp.content[0].text.strip()
+        if not raw:
+            log.warning("[BRAIN] cycle=%d empty response from Claude", cycle)
+            return None
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
         data = json.loads(raw)
         changes = data.get("changes", {})
 
