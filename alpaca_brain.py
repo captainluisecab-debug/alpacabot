@@ -4,13 +4,14 @@ Runs every BRAIN_EVERY_CYCLES cycles. Uses Claude to tune strategy parameters.
 Writes overrides to alpaca_brain_overrides.json which engine reads each cycle.
 """
 from __future__ import annotations
-import json, os, logging
+import json, os, logging, datetime
 from typing import Optional
 
 log = logging.getLogger("alpaca_brain")
 
 BRAIN_EVERY_CYCLES = 10
-OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_overrides.json")
+OVERRIDES_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_overrides.json")
+DECISIONS_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_decisions.jsonl")
 
 PARAM_BOUNDS = {
     "STOP_LOSS_PCT":   (2.0, 8.0),
@@ -107,6 +108,17 @@ Only include parameters that need changing. Empty changes={{}} means no change n
                 new_overrides[k] = max(lo, min(hi, float(v)))
 
         save_overrides(new_overrides)
+        try:
+            with open(DECISIONS_FILE, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({
+                    "ts":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "cycle":      cycle,
+                    "old_params": current or {},
+                    "new_params": new_overrides,
+                    "reasoning":  data.get("reasoning", ""),
+                }) + "\n")
+        except Exception as _e:
+            log.warning("alpaca_brain_decisions write failed: %s", _e)
         log.info("[BRAIN] cycle=%d overrides updated: %s | %s", cycle, new_overrides, data.get("reasoning", ""))
         return new_overrides
 
