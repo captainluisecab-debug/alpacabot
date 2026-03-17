@@ -90,6 +90,9 @@ def _get_next_open() -> float:
         now = datetime.now(timezone.utc)
         et_offset = timedelta(hours=4)   # EDT approximation
         now_et = now - et_offset
+        # Guard: if inside core market hours, market is open — return immediately
+        if now_et.weekday() < 5 and 9 * 60 + 30 <= now_et.hour * 60 + now_et.minute < 16 * 60:
+            return 0.0
         target_et = now_et.replace(hour=9, minute=25, second=0, microsecond=0)
         if target_et <= now_et:
             target_et += timedelta(days=1)
@@ -172,12 +175,14 @@ def _run_cycle(st, cycle: int) -> None:
     # ── Market hours check ──────────────────────────────────────────
     if not _is_market_open():
         log.info("[CYCLE %d] Market closed — waiting", cycle)
+        save_state(st)
         return
 
     # ── Account info ────────────────────────────────────────────────
     account = get_account()
     if account is None:
         log.error("[CYCLE %d] Could not fetch account — skipping", cycle)
+        save_state(st)
         return
 
     cash        = float(account.cash)
@@ -247,6 +252,7 @@ def _run_cycle(st, cycle: int) -> None:
     snapshots = get_all_snapshots(UNIVERSE)
     if not snapshots:
         log.warning("[CYCLE %d] No snapshots available — skipping", cycle)
+        save_state(st)
         return
 
     # ── SELL loop — check exits first ──────────────────────────────
@@ -265,7 +271,7 @@ def _run_cycle(st, cycle: int) -> None:
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
             fill = sell_all(sym)
             if fill:
-                fill_price = float(getattr(fill, "filled_avg_price", snap.price) or snap.price)
+                fill_price = float(fill.get("filled_avg_price") or snap.price)
                 proceeds = pos.usd_invested  # approximate; record_sell computes true pnl
                 pnl = record_sell(st, sym, fill_price, reason=signal.reason)
                 log.info("[CYCLE %d] %s sold | pnl=$%.2f | realized_total=$%.2f",
@@ -281,17 +287,19 @@ def _run_cycle(st, cycle: int) -> None:
                     from supervisor_execution import log_execution
                     log_execution("alpaca", sym, "SELL", proceeds, fill_price, pnl, signal.reason)
                 except Exception:
-                    pass
+                    log.warning("[EXEC_LOG] log_execution failed bot=alpaca side=SELL sym=%s", sym, exc_info=True)
 
     # ── BUY loop — find new entries ─────────────────────────────────
     open_count = len(st.positions)
     if open_count >= max_pos:
         log.info("[CYCLE %d] Max positions (%d) reached — no new buys", cycle, max_pos)
+        save_state(st)
         return
 
     available_cash = cash - CASH_RESERVE_USD
     if available_cash < trade_size:
         log.info("[CYCLE %d] Insufficient cash ($%.2f) for new position", cycle, available_cash)
+        save_state(st)
         return
 
     # Score all symbols: rank by RSI ascending (most oversold first)
@@ -331,7 +339,7 @@ def _run_cycle(st, cycle: int) -> None:
                  cycle, sym, snap.price, snap.rsi, signal.reason, trade_usd, sup_mode)
         fill = buy_notional(sym, trade_usd)
         if fill:
-            fill_price = float(getattr(fill, "filled_avg_price", snap.price) or snap.price)
+            fill_price = float(fill.get("filled_avg_price") or snap.price)
             record_buy(st, sym, fill_price, trade_usd)
             open_count += 1
             try:
@@ -341,7 +349,7 @@ def _run_cycle(st, cycle: int) -> None:
                 from supervisor_execution import log_execution
                 log_execution("alpaca", sym, "BUY", trade_usd, fill_price, 0.0, signal.reason)
             except Exception:
-                pass
+                log.warning("[EXEC_LOG] log_execution failed bot=alpaca side=BUY sym=%s", sym, exc_info=True)
 
     # ── Brain — self-tune parameters every 10 cycles ────────────────
     if cycle % 10 == 0:
