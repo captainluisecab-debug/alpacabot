@@ -96,18 +96,14 @@ Only include parameters that need changing. Empty changes={{}} means no change n
         data = json.loads(raw)
         changes = data.get("changes", {})
 
-        if not changes:
-            log.info("[BRAIN] cycle=%d no parameter changes needed | %s", cycle, data.get("reasoning", ""))
-            return None
-
-        # Apply bounds
+        # Apply bounds to any proposed changes
         new_overrides = dict(current or {})
         for k, v in changes.items():
             if k in PARAM_BOUNDS:
                 lo, hi = PARAM_BOUNDS[k]
                 new_overrides[k] = max(lo, min(hi, float(v)))
 
-        save_overrides(new_overrides)
+        # Audit trail — record every brain decision, including no-change
         try:
             with open(DECISIONS_FILE, "a", encoding="utf-8") as _f:
                 _f.write(json.dumps({
@@ -119,6 +115,12 @@ Only include parameters that need changing. Empty changes={{}} means no change n
                 }) + "\n")
         except Exception as _e:
             log.warning("alpaca_brain_decisions write failed: %s", _e)
+
+        if not changes:
+            log.info("[BRAIN] cycle=%d no parameter changes needed | %s", cycle, data.get("reasoning", ""))
+            return None
+
+        save_overrides(new_overrides)
         log.info("[BRAIN] cycle=%d overrides updated: %s | %s", cycle, new_overrides, data.get("reasoning", ""))
         return new_overrides
 
