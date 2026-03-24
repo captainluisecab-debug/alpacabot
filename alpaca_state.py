@@ -37,6 +37,7 @@ class BotState:
     stop_loss_strikes: Dict[str, int] = field(default_factory=dict)
     blocked_until: Dict[str, int] = field(default_factory=dict)
     peak_equity: float = 0.0  # high-water mark; persisted so restarts don't reset drawdown tracking
+    breakeven_armed: set = field(default_factory=set)  # symbols where profit-lock is sticky-armed
 
 
 def load_state() -> BotState:
@@ -54,6 +55,7 @@ def load_state() -> BotState:
             stop_loss_strikes={str(k): int(v) for k, v in (raw.get("stop_loss_strikes") or {}).items()},
             blocked_until={str(k): int(v) for k, v in (raw.get("blocked_until") or {}).items()},
             peak_equity=float(raw.get("peak_equity", 0.0) or 0.0),
+            breakeven_armed=set(raw.get("breakeven_armed") or []),
         )
         for sym, p in (raw.get("positions") or {}).items():
             st.positions[sym] = BotPosition(**p)
@@ -74,6 +76,7 @@ def save_state(st: BotState) -> None:
         "positions": {sym: asdict(p) for sym, p in st.positions.items()},
         "stop_loss_strikes": dict(st.stop_loss_strikes),
         "blocked_until": dict(st.blocked_until),
+        "breakeven_armed": sorted(st.breakeven_armed),
     }
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -96,6 +99,7 @@ def record_sell(st: BotState, symbol: str, exit_price: float, reason: str = "") 
     pos = st.positions.pop(symbol, None)
     if pos is None:
         return 0.0
+    st.breakeven_armed.discard(symbol)
     pnl = (exit_price - pos.entry_price) / pos.entry_price * pos.usd_invested
     st.realized_pnl_usd += pnl
     st.total_trades += 1

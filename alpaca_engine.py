@@ -264,12 +264,13 @@ def _run_cycle(st, cycle: int) -> None:
         if snap is None:
             continue
 
-        # Profit-lock: if position is up >= 1.5%, tighten stop to breakeven
+        # Profit-lock: once position reaches +1.5%, arm breakeven permanently until exit
         _pnl_now = (snap.price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0.0
-        _eff_stop = BREAKEVEN_STOP_PCT if _pnl_now >= BREAKEVEN_TRIGGER_PCT else stop_loss
-        if _eff_stop != stop_loss:
-            log.info("[CYCLE %d] %s profit-lock ARMED: pnl=%.1f%% stop=%.1f%% -> %.1f%% (breakeven)",
-                     cycle, sym, _pnl_now, stop_loss, _eff_stop)
+        if _pnl_now >= BREAKEVEN_TRIGGER_PCT and sym not in st.breakeven_armed:
+            st.breakeven_armed.add(sym)
+            log.info("[CYCLE %d] %s profit-lock ARMED: pnl=%.1f%% — breakeven stop locked until exit",
+                     cycle, sym, _pnl_now)
+        _eff_stop = BREAKEVEN_STOP_PCT if sym in st.breakeven_armed else stop_loss
 
         signal = compute_signal(
             snap,
