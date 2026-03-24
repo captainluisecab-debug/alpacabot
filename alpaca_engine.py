@@ -256,15 +256,26 @@ def _run_cycle(st, cycle: int) -> None:
         return
 
     # ── SELL loop — check exits first ──────────────────────────────
+    BREAKEVEN_TRIGGER_PCT = 1.5   # move stop to breakeven when unrealized >= this %
+    BREAKEVEN_STOP_PCT    = 0.1   # effective stop after breakeven trigger (small buffer)
+
     for sym, pos in list(st.positions.items()):
         snap = snapshots.get(sym)
         if snap is None:
             continue
+
+        # Profit-lock: if position is up >= 1.5%, tighten stop to breakeven
+        _pnl_now = (snap.price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0.0
+        _eff_stop = BREAKEVEN_STOP_PCT if _pnl_now >= BREAKEVEN_TRIGGER_PCT else stop_loss
+        if _eff_stop != stop_loss:
+            log.info("[CYCLE %d] %s profit-lock ARMED: pnl=%.1f%% stop=%.1f%% -> %.1f%% (breakeven)",
+                     cycle, sym, _pnl_now, stop_loss, _eff_stop)
+
         signal = compute_signal(
             snap,
             open_position=True,
             entry_price=pos.entry_price,
-            stop_loss_pct=stop_loss,
+            stop_loss_pct=_eff_stop,
             take_profit_pct=take_profit,
         )
         if signal.action == "SELL":
