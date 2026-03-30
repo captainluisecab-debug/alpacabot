@@ -172,11 +172,26 @@ def _run_cycle(st, cycle: int) -> None:
     sup_mode  = cmd.get("mode", "NORMAL")
     size_mult = float(cmd.get("size_mult", 1.0))
     entry_ok  = bool(cmd.get("entry_allowed", True))
+    force_flatten = bool(cmd.get("force_flatten", False))
     if sup_mode == "DEFENSE":
         log.info("[CYCLE %d] Supervisor: DEFENSE — no new entries", cycle)
         entry_ok = False
     elif sup_mode == "SCOUT":
         size_mult = min(size_mult, 0.5)
+
+    # Governor FORCE_FLATTEN: close all positions immediately
+    if force_flatten and st.positions:
+        log.warning("[CYCLE %d] GOVERNOR FORCE_FLATTEN: closing %d positions", cycle, len(st.positions))
+        snapshots = get_all_snapshots(UNIVERSE)
+        for sym in list(st.positions.keys()):
+            snap = snapshots.get(sym) if snapshots else None
+            fill = sell_all(sym)
+            if fill:
+                fill_price = float(fill.get("filled_avg_price") or (snap.price if snap else 0))
+                pnl = record_sell(st, sym, fill_price, reason="governor_force_flatten")
+                log.info("[CYCLE %d] FLATTEN %s: pnl=$%.2f", cycle, sym, pnl)
+        save_state(st)
+        return
 
     # Track supervisor mode stability for regime duration filter
     if _sup_mode_since[0] != sup_mode:
