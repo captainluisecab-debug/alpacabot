@@ -65,8 +65,8 @@ def compute_signal(
     # ── Entry logic — AGGRESSIVE ────────────────────────────────────
     if not open_position:
 
-        # ENTRY 1 — Dip buy: RSI below 55 (no EMA required)
-        if rsi < 55:
+        # ENTRY 1 — Dip buy: RSI genuinely oversold + price not in freefall
+        if rsi < 30 and gap_pct > -5.0:
             return sig("BUY", f"oversold rsi={rsi:.1f} gap={gap_pct:.1f}%")
 
         # ENTRY 2 — EMA crossover: prev bar below EMA, current above, RSI <= 65

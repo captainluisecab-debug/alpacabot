@@ -16,7 +16,7 @@ DECISIONS_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alp
 PARAM_BOUNDS = {
     "STOP_LOSS_PCT":   (2.0, 8.0),
     "TAKE_PROFIT_PCT": (5.0, 15.0),
-    "TRADE_SIZE_USD":  (50.0, 200.0),
+    "TRADE_SIZE_USD":  (15.0, 200.0),
     "MAX_POSITIONS":   (2, 8),
 }
 
