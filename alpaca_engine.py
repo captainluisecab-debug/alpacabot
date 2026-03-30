@@ -68,6 +68,11 @@ def _read_supervisor_cmd() -> dict:
     return defaults
 
 
+# Regime stability tracking for entry filter
+_sup_mode_since: tuple = ("", 0.0)  # (mode, first_seen_ts)
+_SUP_MODE_MIN_STABLE_SEC = 7200  # 2 hours: supervisor must be NORMAL this long before entries
+
+
 def _get_next_open() -> float:
     """
     Return seconds until next market open.
@@ -162,6 +167,7 @@ def _run_cycle(st, cycle: int) -> None:
     max_pos      = int(overrides.get("MAX_POSITIONS", MAX_POSITIONS))
 
     # ── Supervisor command ──────────────────────────────────────────
+    global _sup_mode_since
     cmd       = _read_supervisor_cmd()
     sup_mode  = cmd.get("mode", "NORMAL")
     size_mult = float(cmd.get("size_mult", 1.0))
@@ -171,6 +177,16 @@ def _run_cycle(st, cycle: int) -> None:
         entry_ok = False
     elif sup_mode == "SCOUT":
         size_mult = min(size_mult, 0.5)
+
+    # Track supervisor mode stability for regime duration filter
+    if _sup_mode_since[0] != sup_mode:
+        _sup_mode_since = (sup_mode, time.time())
+    _mode_stable_sec = time.time() - _sup_mode_since[1]
+    if sup_mode != "NORMAL" or _mode_stable_sec < _SUP_MODE_MIN_STABLE_SEC:
+        if entry_ok and sup_mode == "NORMAL":
+            log.info("[CYCLE %d] Supervisor NORMAL for %dm < %dm required — entries blocked until stable",
+                     cycle, int(_mode_stable_sec // 60), int(_SUP_MODE_MIN_STABLE_SEC // 60))
+        entry_ok = False if sup_mode != "NORMAL" else (entry_ok and _mode_stable_sec >= _SUP_MODE_MIN_STABLE_SEC)
 
     # ── Market hours check ──────────────────────────────────────────
     if not _is_market_open():
@@ -272,12 +288,15 @@ def _run_cycle(st, cycle: int) -> None:
                      cycle, sym, _pnl_now)
         _eff_stop = BREAKEVEN_STOP_PCT if sym in st.breakeven_armed else stop_loss
 
+        # Adaptive TP: once armed (proven gainer), lower TP to 3% to capture real gains
+        _eff_tp = 3.0 if sym in st.breakeven_armed else take_profit
+
         signal = compute_signal(
             snap,
             open_position=True,
             entry_price=pos.entry_price,
             stop_loss_pct=_eff_stop,
-            take_profit_pct=take_profit,
+            take_profit_pct=_eff_tp,
         )
         if signal.action == "SELL":
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
