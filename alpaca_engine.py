@@ -9,6 +9,8 @@ alpaca_engine.py — Main trading loop for Alpaca stock swing bot.
 Run:
     python alpaca_engine.py
 """
+# SLEEVE: Alpaca — Execute and Obey.
+# Does NOT invent policy. Obeys Governor commands. Goal: positive PnL.
 from __future__ import annotations
 
 import json
