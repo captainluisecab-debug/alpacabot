@@ -1,0 +1,6 @@
+{
+  "TRADE_SIZE_USD": 40.0,
+  "STOP_LOSS_PCT": 3.0,
+  "TAKE_PROFIT_PCT": 6.0,
+  "MAX_POSITIONS": 3
+}

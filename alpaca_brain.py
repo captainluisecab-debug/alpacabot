@@ -14,9 +14,9 @@ OVERRIDES_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alp
 DECISIONS_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_decisions.jsonl")
 
 PARAM_BOUNDS = {
-    "STOP_LOSS_PCT":   (2.0, 8.0),
+    "STOP_LOSS_PCT":   (2.5, 8.0),
     "TAKE_PROFIT_PCT": (5.0, 15.0),
-    "TRADE_SIZE_USD":  (15.0, 200.0),
+    "TRADE_SIZE_USD":  (30.0, 200.0),  # Floor raised: below $30 wins can't cover slippage
     "MAX_POSITIONS":   (2, 8),
 }
 
@@ -76,57 +76,60 @@ If win_rate > 60% and dd < 2%: can increase TRADE_SIZE_USD slightly
 Respond ONLY with valid JSON: {{"changes":{{}}, "reasoning":"one sentence"}}
 Only include parameters that need changing. Empty changes={{}} means no change needed."""
 
+    # Deterministic rule engine — no API call, zero cost
+    params = dict(current or {"STOP_LOSS_PCT": 5.0, "TAKE_PROFIT_PCT": 10.0, "TRADE_SIZE_USD": 120.0, "MAX_POSITIONS": 6})
+    changes = {}
+    if dd_pct > 8:
+        changes["TRADE_SIZE_USD"] = max(params.get("TRADE_SIZE_USD", 80.0) * 0.75, PARAM_BOUNDS["TRADE_SIZE_USD"][0])
+        changes["MAX_POSITIONS"] = max(int(params.get("MAX_POSITIONS", 4)) - 1, PARAM_BOUNDS["MAX_POSITIONS"][0])
+        reasoning = f"Drawdown {dd_pct:.1f}% > 8%: reduced trade size and max positions"
+    elif win_rate < 30 and state.total_trades >= 10:
+        changes["TRADE_SIZE_USD"] = max(params.get("TRADE_SIZE_USD", 80.0) * 0.90, PARAM_BOUNDS["TRADE_SIZE_USD"][0])
+        reasoning = f"Win rate {win_rate:.0f}% < 30% over {state.total_trades} trades: slight size reduction"
+    elif win_rate >= 40 and dd_pct < 5 and state.total_trades >= 5:
+        # Recovery path: scale back up when winning
+        cur_size = params.get("TRADE_SIZE_USD", 80.0)
+        if cur_size < 80:
+            changes["TRADE_SIZE_USD"] = min(cur_size * 1.15, 80.0)
+            reasoning = f"Win rate {win_rate:.0f}% >= 40%, DD {dd_pct:.1f}% < 5%: scaling back up"
+        elif win_rate >= 55 and dd_pct < 3:
+            changes["TRADE_SIZE_USD"] = min(cur_size * 1.10, PARAM_BOUNDS["TRADE_SIZE_USD"][1])
+            reasoning = f"Win rate {win_rate:.0f}% >= 55%, DD {dd_pct:.1f}% < 3%: increasing size"
+        else:
+            reasoning = f"Steady state (win_rate={win_rate:.0f}%, dd={dd_pct:.1f}%): holding params"
+    else:
+        reasoning = f"No rule triggered (win_rate={win_rate:.0f}%, dd={dd_pct:.1f}%): holding params"
+
+    new_overrides = dict(current or {})
+    for k, v in changes.items():
+        if k in PARAM_BOUNDS:
+            lo, hi = PARAM_BOUNDS[k]
+            if k == "MAX_POSITIONS":
+                new_overrides[k] = int(max(lo, min(hi, float(v))))
+            else:
+                new_overrides[k] = round(max(lo, min(hi, float(v))), 2)
+
+    # Audit trail — record every brain decision, including no-change
     try:
-        import anthropic
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = resp.content[0].text.strip()
-        if not raw:
-            log.warning("[BRAIN] cycle=%d empty response from Claude", cycle)
-            return None
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-        data = json.loads(raw)
-        changes = data.get("changes", {})
+        with open(DECISIONS_FILE, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "ts":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "cycle":      cycle,
+                "old_params": current or {},
+                "new_params": new_overrides,
+                "reasoning":  reasoning,
+                "source":     "local_rules",
+            }) + "\n")
+    except Exception as _e:
+        log.warning("alpaca_brain_decisions write failed: %s", _e)
 
-        # Apply bounds to any proposed changes
-        new_overrides = dict(current or {})
-        for k, v in changes.items():
-            if k in PARAM_BOUNDS:
-                lo, hi = PARAM_BOUNDS[k]
-                new_overrides[k] = max(lo, min(hi, float(v)))
-
-        # Audit trail — record every brain decision, including no-change
-        try:
-            with open(DECISIONS_FILE, "a", encoding="utf-8") as _f:
-                _f.write(json.dumps({
-                    "ts":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "cycle":      cycle,
-                    "old_params": current or {},
-                    "new_params": new_overrides,
-                    "reasoning":  data.get("reasoning", ""),
-                }) + "\n")
-        except Exception as _e:
-            log.warning("alpaca_brain_decisions write failed: %s", _e)
-
-        if not changes:
-            log.info("[BRAIN] cycle=%d no parameter changes needed | %s", cycle, data.get("reasoning", ""))
-            return None
-
-        save_overrides(new_overrides)
-        log.info("[BRAIN] cycle=%d overrides updated: %s | %s", cycle, new_overrides, data.get("reasoning", ""))
-        return new_overrides
-
-    except Exception as e:
-        log.warning("[BRAIN] cycle=%d error: %s", cycle, e)
+    if not changes:
+        log.info("[BRAIN] cycle=%d no parameter changes needed | %s", cycle, reasoning)
         return None
+
+    save_overrides(new_overrides)
+    log.info("[BRAIN] cycle=%d overrides updated: %s | %s", cycle, new_overrides, reasoning)
+    return new_overrides
 
 
 def check_escalations(state, cycle: int):

@@ -1,10 +1,11 @@
 """
-alpaca_strategy.py — Swing trading signals for stocks. AGGRESSIVE PAPER MODE.
+alpaca_strategy.py — Swing trading signals for stocks.
 
-BUY conditions — 3 entry types:
-  ENTRY 1 — Dip buy:        RSI < 55 (no EMA required)
-  ENTRY 2 — EMA crossover:  price just crossed above EMA + RSI <= 65
-  ENTRY 3 — Trend ride:     2 green bars + price above EMA + RSI 45-68
+BUY conditions — 2 entry types (quality-first):
+  ENTRY 1 — Dip buy:        RSI < 30 + price within 3% of EMA (not freefall)
+  ENTRY 2 — Trend ride:     2 green bars + above EMA + RSI 45-58 (tighter than 68)
+
+EMA crossover removed — 75% loss rate, generates false signals in choppy markets.
 
 SELL conditions:
   - RSI > 72 + price below EMA (trail exit)
@@ -62,24 +63,18 @@ def compute_signal(
         if rsi > 72 and price < ema:
             return sig("SELL", f"trail_exit rsi={rsi:.1f}")
 
-    # ── Entry logic — AGGRESSIVE ────────────────────────────────────
+    # ── Entry logic — QUALITY FIRST ────────────────────────────────
     if not open_position:
 
-        # ENTRY 1 — Dip buy: RSI genuinely oversold + price not in freefall
-        if rsi < 30 and gap_pct > -5.0:
+        # ENTRY 1 — Dip buy: RSI genuinely oversold + price near EMA (not freefall)
+        if rsi < 30 and gap_pct > -3.0:
             return sig("BUY", f"oversold rsi={rsi:.1f} gap={gap_pct:.1f}%")
 
-        # ENTRY 2 — EMA crossover: prev bar below EMA, current above, RSI <= 65
-        if len(closes) >= 2 and ema > 0:
-            prev_below = closes[-2] < ema
-            now_above  = price > ema
-            if prev_below and now_above and rsi <= 65:
-                return sig("BUY", f"ema_cross_up rsi={rsi:.1f} gap={gap_pct:.1f}%")
-
-        # ENTRY 3 — Trend ride: 2 green bars + above EMA + RSI 45-68
+        # ENTRY 2 — Trend ride: 2 green bars + above EMA + RSI 45-58
+        # Tightened from 68 to 58: entries above RSI 58 are noise, not signal
         if len(closes) >= 3 and ema > 0:
             two_green = closes[-1] > closes[-2] > closes[-3]
-            if two_green and price > ema and 45.0 <= rsi <= 68.0:
+            if two_green and price > ema and 45.0 <= rsi <= 58.0 and gap_pct < 2.0:
                 return sig("BUY", f"trend_ride rsi={rsi:.1f} gap={gap_pct:.1f}%")
 
     return sig("HOLD", "no_signal")
