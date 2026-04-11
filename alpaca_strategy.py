@@ -3,7 +3,10 @@ alpaca_strategy.py — Swing trading signals for stocks.
 
 BUY conditions — 2 entry types (quality-first):
   ENTRY 1 — Dip buy:        RSI < 30 + price within 3% of EMA (not freefall)
-  ENTRY 2 — Trend ride:     2 green bars + above EMA + RSI 45-58 (tighter than 68)
+  ENTRY 2 — Trend ride:     2 green bars + above EMA + RSI 45-65 + gap < 3.0%
+                            (RSI ceiling raised from 58 to 65 — trending stocks
+                             sit at 60-65 most of the time, the tighter window
+                             was filtering all valid signals)
 
 EMA crossover removed — 75% loss rate, generates false signals in choppy markets.
 
@@ -70,11 +73,12 @@ def compute_signal(
         if rsi < 30 and gap_pct > -3.0:
             return sig("BUY", f"oversold rsi={rsi:.1f} gap={gap_pct:.1f}%")
 
-        # ENTRY 2 — Trend ride: 2 green bars + above EMA + RSI 45-58
-        # Tightened from 68 to 58: entries above RSI 58 are noise, not signal
+        # ENTRY 2 — Trend ride: 2 green bars + above EMA + RSI 45-65 + gap < 3%
+        # Tightened from 68 to 65: above 65 is overbought territory, not signal
+        # Loosened from 58 (2026-04-11): trending stocks sit at RSI 60-65
         if len(closes) >= 3 and ema > 0:
             two_green = closes[-1] > closes[-2] > closes[-3]
-            if two_green and price > ema and 45.0 <= rsi <= 58.0 and gap_pct < 2.0:
+            if two_green and price > ema and 45.0 <= rsi <= 65.0 and gap_pct < 3.0:
                 return sig("BUY", f"trend_ride rsi={rsi:.1f} gap={gap_pct:.1f}%")
 
     return sig("HOLD", "no_signal")
