@@ -55,9 +55,16 @@ def compute_signal(
     # ── Exit logic (position open) ──────────────────────────────────
     if open_position and entry_price > 0:
         pnl_pct = (price - entry_price) / entry_price * 100
+        high_since_entry = max(b.high for b in bars[-20:]) if bars else price
+        peak_pnl_pct = (high_since_entry - entry_price) / entry_price * 100
 
         if pnl_pct <= -stop_loss_pct:
             return sig("SELL", f"stop_loss {pnl_pct:.1f}%")
+
+        # Breakeven stop: if position reached +1% at any point, don't let it
+        # become a loss. Exit at breakeven if price returns to entry.
+        if peak_pnl_pct >= 1.0 and pnl_pct <= 0.0:
+            return sig("SELL", f"breakeven_stop (peak was +{peak_pnl_pct:.1f}%, now {pnl_pct:.1f}%)")
 
         if pnl_pct >= take_profit_pct:
             return sig("SELL", f"take_profit {pnl_pct:.1f}%")
