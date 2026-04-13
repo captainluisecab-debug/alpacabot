@@ -55,7 +55,7 @@ def compute_signal(
     # ── Exit logic (position open) ──────────────────────────────────
     if open_position and entry_price > 0:
         pnl_pct = (price - entry_price) / entry_price * 100
-        high_since_entry = max(b.high for b in bars[-20:]) if bars else price
+        high_since_entry = max((b.high for b in (bars or [])[-20:]), default=price)
         peak_pnl_pct = (high_since_entry - entry_price) / entry_price * 100
 
         if pnl_pct <= -stop_loss_pct:
