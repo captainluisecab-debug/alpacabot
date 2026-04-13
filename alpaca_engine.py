@@ -71,8 +71,17 @@ def _read_supervisor_cmd() -> dict:
 
 
 # Regime stability tracking for entry filter
-_sup_mode_since: tuple = ("", 0.0)  # (mode, first_seen_ts)
-_SUP_MODE_MIN_STABLE_SEC = 7200  # 2 hours: supervisor must be NORMAL this long before entries
+# Persisted in alpaca_state.json to survive restarts (prevents gate bypass)
+_sup_mode_since: tuple = ("", 0.0)
+_SUP_MODE_MIN_STABLE_SEC = 7200
+try:
+    import json as _json_init
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_state.json")) as _f:
+        _saved_sup = _json_init.load(_f).get("sup_mode_since")
+    if _saved_sup and isinstance(_saved_sup, list) and len(_saved_sup) == 2:
+        _sup_mode_since = (str(_saved_sup[0]), float(_saved_sup[1]))
+except Exception:
+    pass
 
 
 def _get_next_open() -> float:
@@ -198,6 +207,8 @@ def _run_cycle(st, cycle: int) -> None:
     # Track supervisor mode stability for regime duration filter
     if _sup_mode_since[0] != sup_mode:
         _sup_mode_since = (sup_mode, time.time())
+        # Persist so restarts don't bypass the stability gate
+        st.sup_mode_since = list(_sup_mode_since)
     _mode_stable_sec = time.time() - _sup_mode_since[1]
     if sup_mode != "NORMAL" or _mode_stable_sec < _SUP_MODE_MIN_STABLE_SEC:
         if entry_ok and sup_mode == "NORMAL":
@@ -406,7 +417,11 @@ def _run_cycle(st, cycle: int) -> None:
         ) or "none"
         # Expose live equity/peak on state so brain can read them
         st.equity = equity
-        brain_run(st, cycle, positions_str)
+        # Local-first: skip brain API call when entries are blocked (zero value)
+        if entry_ok:
+            brain_run(st, cycle, positions_str)
+        elif cycle % 100 == 0:
+            log.info("[BRAIN] Skipped — entry_allowed=false, brain adjustments have no effect")
 
     save_state(st)
 

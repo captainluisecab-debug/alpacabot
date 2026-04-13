@@ -77,10 +77,13 @@ def save_state(st: BotState) -> None:
         "stop_loss_strikes": dict(st.stop_loss_strikes),
         "blocked_until": dict(st.blocked_until),
         "breakeven_armed": sorted(st.breakeven_armed),
+        "sup_mode_since": getattr(st, "sup_mode_since", None),
     }
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        _tmp = STATE_FILE + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
             json.dump(raw, f, indent=2)
+        os.replace(_tmp, STATE_FILE)
     except Exception as exc:
         log.error("Failed to save state: %s", exc)
 
