@@ -316,8 +316,9 @@ def _run_cycle(st, cycle: int) -> None:
                      cycle, sym, _pnl_now)
         _eff_stop = BREAKEVEN_STOP_PCT if sym in st.breakeven_armed else stop_loss
 
-        # Adaptive TP: once armed (proven gainer), lower TP to 3% to capture real gains
-        _eff_tp = 3.0 if sym in st.breakeven_armed else take_profit
+        # TP stays at configured level — let winners run.
+        # Breakeven stop already protects capital; lowering TP kills runners.
+        _eff_tp = take_profit
 
         signal = compute_signal(
             snap,
