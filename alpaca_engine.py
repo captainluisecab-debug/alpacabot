@@ -277,6 +277,21 @@ def _run_cycle(st, cycle: int) -> None:
             log.warning("[SYNC] %s not in Alpaca positions — removing from local state", sym)
             st.positions.pop(sym)
 
+    # Sync: add Alpaca positions missing from local state (orphan recovery)
+    if live_positions:
+        from alpaca_state import Position
+        for sym, lp in live_positions.items():
+            if sym not in st.positions:
+                _entry = float(lp.avg_entry_price)
+                _qty = float(lp.qty)
+                _cost = _entry * _qty
+                st.positions[sym] = Position(
+                    symbol=sym, entry_price=_entry,
+                    entry_ts=int(time.time()), usd_invested=round(_cost, 2),
+                )
+                log.warning("[SYNC] %s on Alpaca but not local — added (entry=$%.2f qty=%.4f)",
+                            sym, _entry, _qty)
+
     # ── Log open positions with live P&L ────────────────────────────
     if st.positions:
         for sym, pos in st.positions.items():
