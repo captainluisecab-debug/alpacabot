@@ -279,7 +279,7 @@ def _run_cycle(st, cycle: int) -> None:
 
     # Sync: add Alpaca positions missing from local state (orphan recovery)
     if live_positions:
-        from alpaca_state import Position
+        from alpaca_state import BotPosition as Position
         for sym, lp in live_positions.items():
             if sym not in st.positions:
                 _entry = float(lp.avg_entry_price)
