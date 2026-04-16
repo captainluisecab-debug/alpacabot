@@ -118,11 +118,15 @@ def _get_next_open() -> float:
         return (target_et - now_et).total_seconds()
 
 
+_after_hours_sell_armed = set()
+
 def _after_hours_monitor() -> None:
     """
-    Read-only after-hours overview. Logs extended-hours prices for universe.
-    No trades executed. Just visibility into what is moving overnight.
+    After-hours overview + risk monitor.
+    Logs extended-hours prices. If any HELD position drops >5% from entry,
+    arms a market-open sell flag so the first trading cycle exits it.
     """
+    global _after_hours_sell_armed
     log.info("[AFTER-HOURS] Monitoring extended hours prices (no trading)")
     try:
         from alpaca.data.historical import StockHistoricalDataClient
@@ -133,12 +137,21 @@ def _after_hours_monitor() -> None:
         req    = StockLatestQuoteRequest(symbol_or_symbols=UNIVERSE)
         quotes = client.get_stock_latest_quote(req)
 
+        st = load_state()
         for sym in UNIVERSE:
             q = quotes.get(sym)
             if q:
                 mid = (float(q.ask_price) + float(q.bid_price)) / 2 if q.ask_price and q.bid_price else 0
                 log.info("[AFTER-HOURS] %-6s bid=%.2f ask=%.2f mid=%.2f",
                          sym, float(q.bid_price or 0), float(q.ask_price or 0), mid)
+                if sym in st.positions and mid > 0:
+                    entry = st.positions[sym].entry_price
+                    if entry > 0:
+                        pnl_pct = (mid - entry) / entry * 100
+                        if pnl_pct <= -5.0:
+                            _after_hours_sell_armed.add(sym)
+                            log.warning("[AFTER-HOURS] RISK: %s at %.1f%% from entry ($%.2f -> $%.2f) — "
+                                       "SELL ARMED for market open", sym, pnl_pct, entry, mid)
     except Exception as exc:
         log.warning("[AFTER-HOURS] Quote fetch failed: %s", exc)
 
@@ -314,6 +327,28 @@ def _run_cycle(st, cycle: int) -> None:
         save_state(st)
         return
 
+    # ── After-hours risk sell — execute armed sells from overnight monitor ──
+    global _after_hours_sell_armed
+    for _armed_sym in list(_after_hours_sell_armed):
+        if _armed_sym in st.positions:
+            snap = snapshots.get(_armed_sym)
+            if snap and snap.price > 0:
+                log.warning("[CYCLE %d] AFTER-HOURS SELL ARMED: %s — executing at market open", cycle, _armed_sym)
+                fill = sell_all(_armed_sym)
+                if fill:
+                    fill_price = float(fill.get("filled_avg_price") or snap.price)
+                    pnl = record_sell(st, _armed_sym, fill_price, reason="after_hours_risk")
+                    log.info("[CYCLE %d] %s after-hours risk sell | pnl=$%.2f", cycle, _armed_sym, pnl)
+                    try:
+                        from alpaca_outcome_analyzer import log_trade as _log_outcome
+                        _log_outcome(symbol=_armed_sym, side="SELL", entry_signal="inherited",
+                                     exit_reason="after_hours_risk", pnl_usd=pnl,
+                                     entry_price=st.positions.get(_armed_sym, pos).entry_price if _armed_sym in st.positions else 0,
+                                     exit_price=fill_price, hold_sec=0)
+                    except Exception:
+                        pass
+    _after_hours_sell_armed.clear()
+
     # ── SELL loop — check exits first ──────────────────────────────
     BREAKEVEN_TRIGGER_PCT = 1.5   # move stop to breakeven when unrealized >= this %
     BREAKEVEN_STOP_PCT    = 0.1   # effective stop after breakeven trigger (small buffer)
@@ -352,6 +387,18 @@ def _run_cycle(st, cycle: int) -> None:
                 log.info("[CYCLE %d] %s sold | pnl=$%.2f | realized_total=$%.2f",
                          cycle, sym, pnl, st.realized_pnl_usd)
                 try:
+                    from alpaca_outcome_analyzer import log_trade as _log_outcome
+                    _hold = int(time.time()) - pos.entry_ts if pos.entry_ts > 0 else 0
+                    _log_outcome(
+                        symbol=sym, side="SELL",
+                        entry_signal=getattr(pos, '_entry_signal', 'unknown'),
+                        exit_reason=signal.reason, pnl_usd=pnl,
+                        entry_price=pos.entry_price, exit_price=fill_price,
+                        hold_sec=_hold, rsi_at_exit=snap.rsi if snap else 0,
+                    )
+                except Exception:
+                    log.warning("[OUTCOME] trade log failed sym=%s", sym, exc_info=True)
+                try:
                     import sys as _sys
                     _sup_path = os.environ.get(
                         "SUPERVISOR_DIR",
@@ -377,11 +424,26 @@ def _run_cycle(st, cycle: int) -> None:
         save_state(st)
         return
 
+    # Load outcome analyzer adjustments (symbol blocks + quality data)
+    _analyzer_blocks = set()
+    try:
+        _adj_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_score_adjustments.json")
+        if os.path.exists(_adj_path):
+            _adj = json.load(open(_adj_path))
+            _analyzer_blocks = set(_adj.get("recommended_blocks", []))
+            if _analyzer_blocks:
+                log.info("[ANALYZER] Blocked symbols: %s", _analyzer_blocks)
+    except Exception:
+        pass
+
     # Score all symbols: rank by RSI ascending (most oversold first)
     candidates = []
     for sym, snap in snapshots.items():
         if sym in st.positions:
-            continue  # already holding
+            continue
+        if sym in _analyzer_blocks:
+            log.info("[ANALYZER] %s blocked by outcome analyzer (poor WR)", sym)
+            continue
         signal = compute_signal(snap, open_position=False,
                                 stop_loss_pct=stop_loss,
                                 take_profit_pct=take_profit)
@@ -416,6 +478,8 @@ def _run_cycle(st, cycle: int) -> None:
         if fill:
             fill_price = float(fill.get("filled_avg_price") or snap.price)
             record_buy(st, sym, fill_price, trade_usd)
+            if sym in st.positions:
+                st.positions[sym]._entry_signal = signal.reason
             open_count += 1
             try:
                 import sys as _sys
@@ -425,6 +489,14 @@ def _run_cycle(st, cycle: int) -> None:
                 log_execution("alpaca", sym, "BUY", trade_usd, fill_price, 0.0, signal.reason)
             except Exception:
                 log.warning("[EXEC_LOG] log_execution failed bot=alpaca side=BUY sym=%s", sym, exc_info=True)
+
+    # ── Outcome analyzer — run every 30 cycles (~30 min at 60s cycle) ─
+    if cycle % 30 == 0 and cycle > 0:
+        try:
+            from alpaca_outcome_analyzer import run_analyzer as _run_oa
+            _run_oa()
+        except Exception:
+            log.warning("[OUTCOME] analyzer run failed", exc_info=True)
 
     # ── Brain — self-tune parameters every 10 cycles ────────────────
     if cycle % 10 == 0:
