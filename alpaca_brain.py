@@ -135,7 +135,7 @@ Only include parameters that need changing. Empty changes={{}} means no change n
                 outcome_summary=_outcome,
                 recent_trades=[],
                 market_context={"dd_pct": dd_pct, "win_rate": win_rate},
-                portfolio_context={"equity": equity, "positions": positions_str},
+                portfolio_context={"equity": equity, "positions": positions_summary},
             )
             if _result and _result.get("action") == "adjust":
                 new_overrides, _changes = apply_recommendations(new_overrides, _result, PARAM_BOUNDS)
