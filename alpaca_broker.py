@@ -58,7 +58,7 @@ def buy_notional(symbol: str, usd_amount: float) -> Optional[dict]:
     )
     try:
         order = _trading_client().submit_order(req)
-        log.info("[%s] Order submitted: %s %s $%.2f → id=%s",
+        log.info("[%s] Order submitted: %s %s $%.2f -> id=%s",
                  TRADE_MODE, order.side, symbol, usd_amount, order.id)
         return {"id": str(order.id), "symbol": symbol, "side": "BUY", "notional": usd_amount}
     except Exception as exc:
@@ -71,7 +71,7 @@ def sell_all(symbol: str) -> Optional[dict]:
     log.info("[%s] SELL ALL %s", TRADE_MODE, symbol)
     try:
         resp = _trading_client().close_position(symbol)
-        log.info("[%s] Position closed: %s → id=%s", TRADE_MODE, symbol, resp.id)
+        log.info("[%s] Position closed: %s -> id=%s", TRADE_MODE, symbol, resp.id)
         return {"id": str(resp.id), "symbol": symbol, "side": "SELL"}
     except Exception as exc:
         log.error("sell_all(%s) failed: %s", symbol, exc)

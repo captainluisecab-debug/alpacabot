@@ -209,11 +209,25 @@ def _run_cycle(st, cycle: int) -> None:
         snapshots = get_all_snapshots(UNIVERSE)
         for sym in list(st.positions.keys()):
             snap = snapshots.get(sym) if snapshots else None
+            pos_before = st.positions.get(sym)
             fill = sell_all(sym)
             if fill:
                 fill_price = float(fill.get("filled_avg_price") or (snap.price if snap else 0))
+                proceeds = float(pos_before.usd_invested) if pos_before else 0.0
                 pnl = record_sell(st, sym, fill_price, reason="governor_force_flatten")
                 log.info("[CYCLE %d] FLATTEN %s: pnl=$%.2f", cycle, sym, pnl)
+                try:
+                    import sys as _sys
+                    _sup_path = os.environ.get(
+                        "SUPERVISOR_DIR",
+                        os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "supervisor"))
+                    )
+                    if _sup_path not in _sys.path:
+                        _sys.path.insert(0, _sup_path)
+                    from supervisor_execution import log_execution
+                    log_execution("alpaca", sym, "SELL", proceeds, fill_price, pnl, "governor_force_flatten")
+                except Exception:
+                    log.warning("[EXEC_LOG] log_execution failed bot=alpaca side=SELL sym=%s reason=governor_force_flatten", sym, exc_info=True)
         save_state(st)
         return
 
