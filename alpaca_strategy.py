@@ -22,6 +22,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from alpaca_data import Snapshot
 
+# HITRUN-PARITY: hit-and-run small-profit compounder (matches Kraken Compounder
+# config 0.7% / 15min). Captures fast intraday equity gains before mean-reversion
+# drags them back toward breakeven_stop. Tuned for small-account compounding.
+QUICK_PROFIT_PCT = 0.007
+QUICK_PROFIT_MAX_HOLD_SEC = 900
+
 
 @dataclass
 class Signal:
@@ -39,6 +45,7 @@ def compute_signal(
     entry_price: float = 0.0,
     stop_loss_pct: float = 3.0,
     take_profit_pct: float = 6.0,
+    hold_sec: int = 0,
 ) -> Signal:
     price = snap.price
     rsi   = snap.rsi
@@ -61,6 +68,12 @@ def compute_signal(
         pnl_pct = (price - entry_price) / entry_price * 100
         high_since_entry = max((b.high for b in (bars or [])[-20:]), default=price)
         peak_pnl_pct = (high_since_entry - entry_price) / entry_price * 100
+
+        # HITRUN-PARITY: hit-and-run small quick profit within short hold window.
+        # Checked BEFORE stop/breakeven so small gains get captured before they
+        # have a chance to reverse. Matches Kraken Compounder (0.7% / 15min).
+        if hold_sec > 0 and hold_sec <= QUICK_PROFIT_MAX_HOLD_SEC and pnl_pct >= QUICK_PROFIT_PCT * 100:
+            return sig("SELL", f"quick_profit_hitrun pnl={pnl_pct:.2f}% hold={hold_sec}s")
 
         if pnl_pct <= -stop_loss_pct:
             return sig("SELL", f"stop_loss {pnl_pct:.1f}%")

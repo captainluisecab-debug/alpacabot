@@ -384,12 +384,14 @@ def _run_cycle(st, cycle: int) -> None:
         # Breakeven stop already protects capital; lowering TP kills runners.
         _eff_tp = take_profit
 
+        _hold_sec_alp = (int(time.time()) - pos.entry_ts) if (pos and pos.entry_ts) else 0
         signal = compute_signal(
             snap,
             open_position=True,
             entry_price=pos.entry_price,
             stop_loss_pct=_eff_stop,
             take_profit_pct=_eff_tp,
+            hold_sec=_hold_sec_alp,
         )
         if signal.action == "SELL":
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
