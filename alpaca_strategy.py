@@ -45,12 +45,16 @@ def compute_signal(
     ema   = snap.ema
     sym   = snap.symbol
     bars  = snap.bars
+    atr   = getattr(snap, "atr", 0.0)
+    vwap  = getattr(snap, "vwap", 0.0)  # 0.0 = unavailable (pre-market, fetch fail); fail-open
 
     def sig(action: str, reason: str) -> Signal:
         return Signal(action, sym, price, rsi, ema, reason)
 
     closes = [b.close for b in bars]
     gap_pct = (price - ema) / ema * 100 if ema > 0 else 0.0
+    # VWAP distance in ATRs (advisory, logged for observability). 0.0 when VWAP unavailable.
+    vwap_dist_atr = (price - vwap) / atr if (vwap > 0 and atr > 0) else 0.0
 
     # ── Exit logic (position open) ──────────────────────────────────
     if open_position and entry_price > 0:
@@ -77,15 +81,18 @@ def compute_signal(
     if not open_position:
 
         # ENTRY 1 — Dip buy: RSI genuinely oversold + price near EMA (not freefall)
+        # VWAP is not gated here; oversold dips below VWAP are desirable (buying the dip).
         if rsi < 30 and gap_pct > -3.0:
-            return sig("BUY", f"oversold rsi={rsi:.1f} gap={gap_pct:.1f}%")
+            return sig("BUY", f"oversold rsi={rsi:.1f} gap={gap_pct:.1f}% vwap_dist={vwap_dist_atr:+.2f}atr")
 
         # ENTRY 2 — Trend ride: 2 green bars + above EMA + RSI 45-65 + gap < 3%
-        # Tightened from 68 to 65: above 65 is overbought territory, not signal
-        # Loosened from 58 (2026-04-11): trending stocks sit at RSI 60-65
+        # VWAP stretch guard (advisory): if session VWAP is available, block entries
+        # stretched > 0.5 ATR above VWAP — classic 'chase' trap. Fail-open when vwap=0.0.
         if len(closes) >= 3 and ema > 0:
             two_green = closes[-1] > closes[-2] > closes[-3]
             if two_green and price > ema and 45.0 <= rsi <= 65.0 and gap_pct < 3.0:
-                return sig("BUY", f"trend_ride rsi={rsi:.1f} gap={gap_pct:.1f}%")
+                if vwap > 0 and atr > 0 and price > vwap + 0.5 * atr:
+                    return sig("HOLD", f"vwap_extended price=${price:.2f} vwap=${vwap:.2f} dist={vwap_dist_atr:+.2f}atr")
+                return sig("BUY", f"trend_ride rsi={rsi:.1f} gap={gap_pct:.1f}% vwap_dist={vwap_dist_atr:+.2f}atr")
 
     return sig("HOLD", "no_signal")
