@@ -8,20 +8,53 @@ from __future__ import annotations
 
 import logging
 import socket
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from alpaca_settings import ALPACA_API_KEY, ALPACA_SECRET_KEY
 
-# Fail-fast on socket stalls. IEX free-tier data endpoint chronically flakes
-# at market open/close; without this cap, a slow packet stalls the cycle on
-# the OS-level TCP timeout (~60-75s on Windows) and blocks all subsequent
-# symbol fetches in the same cycle. 15s is long enough for a healthy fetch
-# under load and short enough that the next symbol gets its chance.
+# Fail-fast on socket stalls. Kernel-level TCP SYN timeout on Windows is
+# ~21s; a bad AWS ELB backend IP can still stall that long even with this
+# set, but this closes the gap for any Python-level socket that respects
+# the default.
 socket.setdefaulttimeout(15.0)
 
+# Connect/read timeouts injected into every alpaca-py HTTP call via
+# _session.request monkey-patch in _client(). See _client() below.
+# connect=5s fails fast if an AWS ELB backend IP is unreachable; read=20s
+# tolerates slow IEX feed responses during market peak.
+_HTTP_TIMEOUT = (5, 20)
+
 log = logging.getLogger("alpaca_data")
+
+
+def _retry_fetch(fn: Callable, *args, max_attempts: int = 2, **kwargs):
+    """
+    Retry a network-bound fetch on transient timeout/connection errors.
+    Returns fn's result on success. Raises the last exception if all
+    attempts exhausted. Non-network errors (auth, validation, etc.) bubble
+    up immediately without retry.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            msg = str(exc).lower()
+            transient = any(tok in msg for tok in
+                            ("timed out", "timeout", "connection", "max retries"))
+            if not transient:
+                raise
+            last_exc = exc
+            if attempt < max_attempts:
+                sleep_s = 0.75 * attempt  # 0.75s, then 1.5s
+                log.warning("[RETRY] %s attempt %d/%d transient failure: %s -- retrying in %.2fs",
+                            getattr(fn, "__name__", "fetch"), attempt, max_attempts, exc, sleep_s)
+                _time.sleep(sleep_s)
+    assert last_exc is not None
+    raise last_exc
 
 
 @dataclass
@@ -57,6 +90,18 @@ def _client():
     if _cached_client is None:
         from alpaca.data.historical import StockHistoricalDataClient
         _cached_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        # Monkey-patch the underlying requests.Session to always inject a
+        # timeout. The alpaca-py SDK otherwise passes timeout=None to
+        # urllib3, which causes the "connect timeout=None" pattern seen in
+        # ISSUE-010 error logs: with no Python-level timeout, the socket
+        # falls back to kernel TCP SYN behavior (~21s on Windows).
+        sess = getattr(_cached_client, "_session", None)
+        if sess is not None and hasattr(sess, "request"):
+            _orig_request = sess.request
+            def _request_with_timeout(method, url, **kwargs):
+                kwargs.setdefault("timeout", _HTTP_TIMEOUT)
+                return _orig_request(method, url, **kwargs)
+            sess.request = _request_with_timeout
     return _cached_client
 
 
@@ -132,18 +177,18 @@ def get_intraday_bars_today(symbol: str) -> List[Bar]:
         # Pre-market (before 13:00 UTC) — no session data yet today
         return []
 
+    req = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+        start=today_start,
+        end=now_utc,
+        feed="iex",
+    )
     try:
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-            start=today_start,
-            end=now_utc,
-            feed="iex",
-        )
-        resp = client.get_stock_bars(req)
+        resp = _retry_fetch(client.get_stock_bars, req)
         raw = resp.data.get(symbol, [])
     except Exception as exc:
-        log.warning("get_intraday_bars_today(%s) failed: %s", symbol, exc)
+        log.warning("get_intraday_bars_today(%s) failed after retries: %s", symbol, exc)
         return []
 
     bars = []
@@ -169,13 +214,13 @@ def get_bars(symbol: str, days: int = 60) -> List[Bar]:
     end   = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
 
+    req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                           start=start, end=end, feed="iex")
     try:
-        req  = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
-                                start=start, end=end, feed="iex")
-        resp = client.get_stock_bars(req)
+        resp = _retry_fetch(client.get_stock_bars, req)
         raw  = resp.data.get(symbol, [])
     except Exception as exc:
-        log.error("get_bars(%s) failed: %s", symbol, exc)
+        log.error("get_bars(%s) failed after retries: %s", symbol, exc)
         return []
 
     bars = []
@@ -196,13 +241,13 @@ def get_latest_price(symbol: str) -> Optional[float]:
     """Fetch latest trade price."""
     from alpaca.data.requests import StockLatestTradeRequest
     client = _client()
+    req = StockLatestTradeRequest(symbol_or_symbols=symbol, feed="iex")
     try:
-        req  = StockLatestTradeRequest(symbol_or_symbols=symbol, feed="iex")
-        resp = client.get_stock_latest_trade(req)
+        resp = _retry_fetch(client.get_stock_latest_trade, req)
         trade = resp.get(symbol)
         return float(trade.price) if trade else None
     except Exception as exc:
-        log.error("get_latest_price(%s) failed: %s", symbol, exc)
+        log.error("get_latest_price(%s) failed after retries: %s", symbol, exc)
         return None
 
 
