@@ -7,11 +7,19 @@ No separate data subscription needed — included with free Alpaca account.
 from __future__ import annotations
 
 import logging
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from alpaca_settings import ALPACA_API_KEY, ALPACA_SECRET_KEY
+
+# Fail-fast on socket stalls. IEX free-tier data endpoint chronically flakes
+# at market open/close; without this cap, a slow packet stalls the cycle on
+# the OS-level TCP timeout (~60-75s on Windows) and blocks all subsequent
+# symbol fetches in the same cycle. 15s is long enough for a healthy fetch
+# under load and short enough that the next symbol gets its chance.
+socket.setdefaulttimeout(15.0)
 
 log = logging.getLogger("alpaca_data")
 
@@ -37,9 +45,19 @@ class Snapshot:
     vwap: float = 0.0    # session VWAP (intraday); 0.0 = unavailable, strategy falls back to VWAP-agnostic
 
 
+# Module-level client cache. StockHistoricalDataClient reuses an underlying
+# requests.Session with HTTPAdapter connection pool, so reusing the same
+# instance across calls keeps TCP+TLS sessions warm and eliminates the
+# 24 handshakes/cycle (8 symbols x 3 fetches) that was amplifying flake rate.
+_cached_client = None
+
+
 def _client():
-    from alpaca.data.historical import StockHistoricalDataClient
-    return StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+    global _cached_client
+    if _cached_client is None:
+        from alpaca.data.historical import StockHistoricalDataClient
+        _cached_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+    return _cached_client
 
 
 def _ema(values: List[float], period: int) -> float:
