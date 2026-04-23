@@ -72,8 +72,11 @@ def _read_supervisor_cmd() -> dict:
 
 # Regime stability tracking for entry filter
 # Persisted in alpaca_state.json to survive restarts (prevents gate bypass)
+# 30 min stability floor: market hours are 09:30-16:00 ET (6.5h). A 120m
+# gate cost up to 2h of a 6.5h session every morning. 30m still filters
+# open-bell volatility but leaves 6h of tradable window.
 _sup_mode_since: tuple = ("", 0.0)
-_SUP_MODE_MIN_STABLE_SEC = 7200
+_SUP_MODE_MIN_STABLE_SEC = 1800
 try:
     import json as _json_init
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_state.json")) as _f:
