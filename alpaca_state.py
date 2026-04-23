@@ -38,6 +38,10 @@ class BotState:
     blocked_until: Dict[str, int] = field(default_factory=dict)
     peak_equity: float = 0.0  # high-water mark; persisted so restarts don't reset drawdown tracking
     breakeven_armed: set = field(default_factory=set)  # symbols where profit-lock is sticky-armed
+    # Per-symbol regime classification (TRENDING_UP/TRENDING_DOWN/RANGING).
+    # Read by supervisor so Alpaca's sleeve decisions are driven by stock
+    # market state, not by crypto regime from Kraken's pair_regime.
+    pair_regime: Dict[str, str] = field(default_factory=dict)
 
 
 def load_state() -> BotState:
@@ -56,6 +60,7 @@ def load_state() -> BotState:
             blocked_until={str(k): int(v) for k, v in (raw.get("blocked_until") or {}).items()},
             peak_equity=float(raw.get("peak_equity", 0.0) or 0.0),
             breakeven_armed=set(raw.get("breakeven_armed") or []),
+            pair_regime={str(k): str(v) for k, v in (raw.get("pair_regime") or {}).items()},
         )
         for sym, p in (raw.get("positions") or {}).items():
             st.positions[sym] = BotPosition(**p)
@@ -78,6 +83,7 @@ def save_state(st: BotState) -> None:
         "blocked_until": dict(st.blocked_until),
         "breakeven_armed": sorted(st.breakeven_armed),
         "sup_mode_since": getattr(st, "sup_mode_since", None),
+        "pair_regime": dict(st.pair_regime),
     }
     try:
         _tmp = STATE_FILE + ".tmp"

@@ -341,6 +341,22 @@ def _run_cycle(st, cycle: int) -> None:
         save_state(st)
         return
 
+    # Classify per-symbol regime from current indicators and persist to
+    # state so the supervisor can read a stock-market regime that's
+    # independent from Kraken's crypto pair_regime. Classification:
+    #   TRENDING_UP   : price > EMA20 and RSI > 55
+    #   TRENDING_DOWN : price < EMA20 and RSI < 45
+    #   RANGING       : otherwise
+    _pair_regime = {}
+    for _sym, _snap in snapshots.items():
+        if _snap.price > _snap.ema and _snap.rsi > 55.0:
+            _pair_regime[_sym] = "TRENDING_UP"
+        elif _snap.price < _snap.ema and _snap.rsi < 45.0:
+            _pair_regime[_sym] = "TRENDING_DOWN"
+        else:
+            _pair_regime[_sym] = "RANGING"
+    st.pair_regime = _pair_regime
+
     # ── After-hours risk sell — execute armed sells from overnight monitor ──
     global _after_hours_sell_armed
     for _armed_sym in list(_after_hours_sell_armed):
