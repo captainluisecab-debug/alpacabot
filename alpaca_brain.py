@@ -92,9 +92,15 @@ Only include parameters that need changing. Empty changes={{}} means no change n
         if cur_size < 80:
             changes["TRADE_SIZE_USD"] = min(cur_size * 1.15, 80.0)
             reasoning = f"Win rate {win_rate:.0f}% >= 40%, DD {dd_pct:.1f}% < 5%: scaling back up"
-        elif win_rate >= 55 and dd_pct < 3:
+        elif win_rate >= 55 and dd_pct < 3 and state.total_trades >= 20:
+            # Size-up gated on >=20-trade sample. On 2026-04-23 a 5W/0L
+            # sample fired this branch and pushed TRADE_SIZE_USD to $200
+            # over many runaway-loop iterations. Small samples are not
+            # statistically meaningful enough to justify autonomous
+            # sizing increases; 20 trades is a reasonable minimum for
+            # win-rate to stabilize.
             changes["TRADE_SIZE_USD"] = min(cur_size * 1.10, PARAM_BOUNDS["TRADE_SIZE_USD"][1])
-            reasoning = f"Win rate {win_rate:.0f}% >= 55%, DD {dd_pct:.1f}% < 3%: increasing size"
+            reasoning = f"Win rate {win_rate:.0f}% >= 55% over {state.total_trades} trades, DD {dd_pct:.1f}% < 3%: increasing size"
         else:
             reasoning = f"Steady state (win_rate={win_rate:.0f}%, dd={dd_pct:.1f}%): holding params"
     else:
