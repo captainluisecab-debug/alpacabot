@@ -4,7 +4,7 @@ Runs every BRAIN_EVERY_CYCLES cycles. Uses Claude to tune strategy parameters.
 Writes overrides to alpaca_brain_overrides.json which engine reads each cycle.
 """
 from __future__ import annotations
-import json, os, logging, datetime
+import json, os, logging, datetime, time
 from typing import Optional
 
 log = logging.getLogger("alpaca_brain")
