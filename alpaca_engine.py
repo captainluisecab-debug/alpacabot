@@ -270,6 +270,13 @@ def _run_cycle(st, cycle: int) -> None:
     peak    = st.peak_equity if st.peak_equity > 0 else equity
     dd_pct  = (equity - peak) / peak * 100 if peak > 0 else 0.0
 
+    # Canonical cross-sleeve state fields (ALPACA_STATE_SCHEMA_UNIFY).
+    # Set early so ALL save_state() call sites (including early returns for
+    # market-closed, no-snapshots, account-fetch-fail) persist current truth.
+    st.equity_usd = float(equity)
+    st.unrealized_pnl_usd = float(unrealized)
+    st.dd_pct = float(dd_pct)
+
     # Dynamic baseline: use peak equity as baseline so pnl% reflects drawdown from ATH
     baseline = peak if peak > 0 else equity
     pnl_pct  = (equity - baseline) / baseline * 100 if baseline > 0 else 0.0
@@ -540,20 +547,6 @@ def _run_cycle(st, cycle: int) -> None:
         ) or "none"
         # Expose live equity/peak on state so brain can read them (legacy)
         st.equity = equity
-        # Canonical cross-sleeve fields for ALPACA_STATE_SCHEMA_UNIFY.
-        # Populated every cycle; persisted by save_state so supervisor /
-        # autonomy_guard / sentinel can read with the unified contract.
-        st.equity_usd = float(equity)
-        st.dd_pct = float(dd_pct)
-        try:
-            _unrealized = sum(
-                (snap.price - pos.entry_price) / pos.entry_price * pos.usd_invested
-                for sym, pos in st.positions.items()
-                if (snap := snapshots.get(sym)) is not None and pos.entry_price > 0
-            )
-        except Exception:
-            _unrealized = 0.0
-        st.unrealized_pnl_usd = float(_unrealized)
         # Local-first: skip brain API call when entries are blocked (zero value)
         if entry_ok:
             brain_run(st, cycle, positions_str)
