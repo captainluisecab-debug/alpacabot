@@ -53,6 +53,96 @@ from alpaca_strategy import compute_signal
 from alpaca_broker import buy_notional, get_account, get_positions, sell_all
 from alpaca_state import load_state, record_buy, record_sell, save_state
 from alpaca_brain import run_brain as brain_run, load_overrides as brain_overrides
+from alpaca_brain import PARAM_BOUNDS as ALPACA_PARAM_BOUNDS
+
+
+_BASE = os.path.dirname(os.path.abspath(__file__))
+PAIR_STATUS_FILE       = os.path.join(_BASE, "alpaca_pair_status.json")
+SENTINEL_OVERRIDE_FILE = os.path.join(_BASE, "alpaca_sentinel_override.json")
+
+
+def _read_pair_status_blocks() -> set:
+    """Read alpaca_pair_status.json. Return set of ticker symbols that are
+    blocked (status in COOLDOWN/PROBATION/DISABLED_SOFT with valid TTL).
+    Mirrors enzobot's _apply_pair_status; skips the _meta key.
+    """
+    if not os.path.exists(PAIR_STATUS_FILE):
+        return set()
+    try:
+        with open(PAIR_STATUS_FILE, encoding="utf-8") as f:
+            obj = json.load(f) or {}
+    except Exception as exc:
+        log.warning("[PAIR_STATUS] read failed: %s", exc)
+        return set()
+
+    now_dt = datetime.now(timezone.utc)
+    blocked = set()
+    for sym, entry in obj.items():
+        if sym.startswith("_"):
+            continue  # skip _meta
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status", "ACTIVE")
+        # TTL check — expired rows revert to ACTIVE by ignoring
+        ttl = entry.get("ttl_ts")
+        if ttl:
+            try:
+                expiry_dt = datetime.fromisoformat(str(ttl).replace("Z", "+00:00"))
+                if now_dt > expiry_dt:
+                    continue
+            except Exception:
+                pass
+        if status in ("COOLDOWN", "PROBATION", "DISABLED_SOFT"):
+            blocked.add(sym)
+    return blocked
+
+
+def _apply_sentinel_override(overrides: dict) -> dict:
+    """Read alpaca_sentinel_override.json and merge into overrides dict.
+    Sentinel wins when both brain and sentinel set the same param.
+    Validates against ALPACA_PARAM_BOUNDS before applying.
+    Honors TTL — expired overrides are ignored (brain baseline takes over).
+    Returns a NEW merged dict; does not mutate the input.
+    """
+    merged = dict(overrides or {})
+    if not os.path.exists(SENTINEL_OVERRIDE_FILE):
+        return merged
+    try:
+        with open(SENTINEL_OVERRIDE_FILE, encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception as exc:
+        log.warning("[SENTINEL] override read failed: %s", exc)
+        return merged
+
+    # TTL check
+    ttl_expiry = obj.get("ttl_expiry", "")
+    try:
+        expiry_dt = datetime.fromisoformat(ttl_expiry.replace("Z", "+00:00"))
+        if datetime.now(expiry_dt.tzinfo) > expiry_dt:
+            return merged
+    except Exception:
+        return merged
+
+    changes = obj.get("changes", {}) or {}
+    applied = {}
+    for k, v in changes.items():
+        if k not in ALPACA_PARAM_BOUNDS:
+            log.warning("[SENTINEL] dropped %s=%s — not in ALPACA_PARAM_BOUNDS", k, v)
+            continue
+        lo, hi = ALPACA_PARAM_BOUNDS[k]
+        try:
+            clamped = max(lo, min(hi, float(v)))
+            if k == "MAX_POSITIONS":
+                clamped = int(clamped)
+            merged[k] = clamped
+            applied[k] = clamped
+        except Exception as exc:
+            log.warning("[SENTINEL] %s clamp failed: %s", k, exc)
+
+    if applied:
+        log.warning("[SENTINEL] override applied: %s ttl=%s reason=%s",
+                    applied, ttl_expiry, obj.get("reason", ""))
+    return merged
 
 
 def _read_supervisor_cmd() -> dict:
@@ -186,12 +276,24 @@ def _is_market_open() -> bool:
 def _run_cycle(st, cycle: int) -> None:
     st.cycle = cycle
 
-    # ── Brain overrides — load every cycle, run brain every 10 ─────
-    overrides    = brain_overrides()
+    # ── Brain overrides + Sentinel override ─────────────────────────
+    # Parity with enzobot: brain baseline, then sentinel tightens (sentinel
+    # wins on overlapping keys). Sentinel override is TTL-bounded; expired
+    # rows fall back to brain baseline automatically.
+    overrides = brain_overrides()
+    overrides = _apply_sentinel_override(overrides)
     stop_loss    = overrides.get("STOP_LOSS_PCT",   STOP_LOSS_PCT)
     take_profit  = overrides.get("TAKE_PROFIT_PCT", TAKE_PROFIT_PCT)
     trade_size   = overrides.get("TRADE_SIZE_USD",  TRADE_SIZE_USD)
     max_pos      = int(overrides.get("MAX_POSITIONS", MAX_POSITIONS))
+
+    # ── Pair status ladder — COOLDOWN/PROBATION/DISABLED_SOFT blocks.
+    # Parity with enzobot's pair_status.json. Additional per-ticker
+    # protection layered on top of the stop_loss_strikes blocked_until
+    # mechanism. TTL-bounded; auto-reverts when TTL expires.
+    pair_status_blocked = _read_pair_status_blocks()
+    if pair_status_blocked:
+        log.info("[CYCLE %d] pair_status blocks: %s", cycle, sorted(pair_status_blocked))
 
     # ── Supervisor command ──────────────────────────────────────────
     global _sup_mode_since
@@ -502,6 +604,11 @@ def _run_cycle(st, cycle: int) -> None:
             break
         if not entry_ok:
             break
+        # Pair-status ladder: skip if autonomy loop / sentinel has this
+        # ticker in COOLDOWN/PROBATION/DISABLED_SOFT (TTL-bounded)
+        if sym in pair_status_blocked:
+            log.info("[CYCLE %d] %s blocked by pair_status — skipping", cycle, sym)
+            continue
         # Stop-loss strike block: skip if symbol is blocked this cycle
         if sym in st.blocked_until and cycle < st.blocked_until[sym]:
             log.info("[CYCLE %d] %s blocked until cycle %d (stop_loss strikes) — skipping",
