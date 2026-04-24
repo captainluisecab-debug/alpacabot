@@ -11,11 +11,16 @@ import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 log = logging.getLogger("alpaca_state")
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_state.json")
+BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE       = os.path.join(BASE_DIR, "alpaca_state.json")
+# Unified exit-ledger file. Schema matches enzobot's exit_counterfactuals.jsonl
+# so sentinel triggers (B2/B4/B6/B12) can consume it with one code path.
+EXIT_LEDGER_FILE = os.path.join(BASE_DIR, "alpaca_exit_counterfactuals.jsonl")
 
 
 @dataclass
@@ -42,6 +47,12 @@ class BotState:
     # Read by supervisor so Alpaca's sleeve decisions are driven by stock
     # market state, not by crypto regime from Kraken's pair_regime.
     pair_regime: Dict[str, str] = field(default_factory=dict)
+    # Canonical cross-sleeve state fields (ALPACA_STATE_SCHEMA_UNIFY).
+    # Engine populates these each cycle; autonomy_guard reads them without
+    # the fallback ladder. Aliases (peak_equity, realized_pnl_usd) still work.
+    equity_usd: float = 0.0
+    unrealized_pnl_usd: float = 0.0
+    dd_pct: float = 0.0
 
 
 def load_state() -> BotState:
@@ -61,6 +72,9 @@ def load_state() -> BotState:
             peak_equity=float(raw.get("peak_equity", 0.0) or 0.0),
             breakeven_armed=set(raw.get("breakeven_armed") or []),
             pair_regime={str(k): str(v) for k, v in (raw.get("pair_regime") or {}).items()},
+            equity_usd=float(raw.get("equity_usd", 0.0) or 0.0),
+            unrealized_pnl_usd=float(raw.get("unrealized_pnl_usd", 0.0) or 0.0),
+            dd_pct=float(raw.get("dd_pct", 0.0) or 0.0),
         )
         for sym, p in (raw.get("positions") or {}).items():
             st.positions[sym] = BotPosition(**p)
@@ -72,18 +86,25 @@ def load_state() -> BotState:
 
 def save_state(st: BotState) -> None:
     raw = {
-        "realized_pnl_usd": st.realized_pnl_usd,
-        "total_trades": st.total_trades,
-        "winning_trades": st.winning_trades,
-        "losing_trades": st.losing_trades,
-        "cycle": st.cycle,
-        "peak_equity": st.peak_equity,
-        "positions": {sym: asdict(p) for sym, p in st.positions.items()},
-        "stop_loss_strikes": dict(st.stop_loss_strikes),
-        "blocked_until": dict(st.blocked_until),
-        "breakeven_armed": sorted(st.breakeven_armed),
-        "sup_mode_since": getattr(st, "sup_mode_since", None),
-        "pair_regime": dict(st.pair_regime),
+        # ── Canonical cross-sleeve fields (primary) ───────────────────
+        "equity_usd":         float(getattr(st, "equity_usd", 0.0) or 0.0),
+        "realized_pnl_usd":   st.realized_pnl_usd,
+        "unrealized_pnl_usd": float(getattr(st, "unrealized_pnl_usd", 0.0) or 0.0),
+        "dd_pct":             float(getattr(st, "dd_pct", 0.0) or 0.0),
+        "peak_equity_usd":    st.peak_equity,
+        # ── Alpaca-specific fields ────────────────────────────────────
+        "total_trades":       st.total_trades,
+        "winning_trades":     st.winning_trades,
+        "losing_trades":      st.losing_trades,
+        "cycle":              st.cycle,
+        "positions":          {sym: asdict(p) for sym, p in st.positions.items()},
+        "stop_loss_strikes":  dict(st.stop_loss_strikes),
+        "blocked_until":      dict(st.blocked_until),
+        "breakeven_armed":    sorted(st.breakeven_armed),
+        "sup_mode_since":     getattr(st, "sup_mode_since", None),
+        "pair_regime":        dict(st.pair_regime),
+        # ── Legacy aliases (kept so existing readers don't break) ─────
+        "peak_equity":        st.peak_equity,
     }
     try:
         _tmp = STATE_FILE + ".tmp"
@@ -92,6 +113,54 @@ def save_state(st: BotState) -> None:
         os.replace(_tmp, STATE_FILE)
     except Exception as exc:
         log.error("Failed to save state: %s", exc)
+
+
+def _write_exit_ledger_row(
+    *,
+    symbol: str,
+    entry_price: float,
+    exit_price: float,
+    qty: Optional[float],
+    usd_invested: float,
+    pnl_usd: float,
+    exit_reason: str,
+    hold_sec: int,
+    regime_at_entry: Optional[str],
+    regime_at_exit: Optional[str],
+    score_at_entry: Optional[float],
+) -> None:
+    """Append one row to alpaca_exit_counterfactuals.jsonl.
+
+    Schema matches enzobot's exit_counterfactuals.jsonl so sentinel triggers
+    (B2/B4/B6/B12) can read both files with the same parser.
+    """
+    now = time.time()
+    # Derived qty fallback: usd_invested / entry_price
+    _qty = qty if qty is not None else (usd_invested / entry_price if entry_price else 0.0)
+    row = {
+        "type":             "exit",
+        "id":               f"{symbol}_{int(now)}",
+        "ts":               now,
+        "ts_iso":           datetime.now(timezone.utc).isoformat(),
+        "pair":             symbol,
+        "side":             "SELL",
+        "entry_price":      float(entry_price),
+        "exit_price":       float(exit_price),
+        "qty":              float(_qty),
+        "usd_invested":     float(usd_invested),
+        "pnl_usd":          round(float(pnl_usd), 4),
+        "exit_reason":      exit_reason,
+        "hold_sec":         int(hold_sec or 0),
+        "regime_at_entry":  regime_at_entry,
+        "regime_at_exit":   regime_at_exit,
+        "score_at_entry":   score_at_entry,
+        "sleeve":           "alpaca",
+    }
+    try:
+        with open(EXIT_LEDGER_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as exc:
+        log.warning("exit ledger write failed: %s", exc)
 
 
 def record_buy(st: BotState, symbol: str, entry_price: float, usd: float) -> None:
@@ -104,7 +173,16 @@ def record_buy(st: BotState, symbol: str, entry_price: float, usd: float) -> Non
     save_state(st)
 
 
-def record_sell(st: BotState, symbol: str, exit_price: float, reason: str = "") -> float:
+def record_sell(
+    st: BotState,
+    symbol: str,
+    exit_price: float,
+    reason: str = "",
+    *,
+    qty: Optional[float] = None,
+    regime_at_exit: Optional[str] = None,
+    score_at_entry: Optional[float] = None,
+) -> float:
     pos = st.positions.pop(symbol, None)
     if pos is None:
         return 0.0
@@ -132,5 +210,26 @@ def record_sell(st: BotState, symbol: str, exit_price: float, reason: str = "") 
                 )
                 # Reset strike counter so it can accumulate again after the block
                 st.stop_loss_strikes[symbol] = 0
+
+    # Unified exit ledger (parity with enzobot for sentinel consumption)
+    try:
+        _hold = int(time.time()) - pos.entry_ts if pos.entry_ts else 0
+        _regime_exit = regime_at_exit or st.pair_regime.get(symbol)
+        _write_exit_ledger_row(
+            symbol=symbol,
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            qty=qty,
+            usd_invested=pos.usd_invested,
+            pnl_usd=pnl,
+            exit_reason=reason,
+            hold_sec=_hold,
+            regime_at_entry=None,  # not currently tracked at buy time
+            regime_at_exit=_regime_exit,
+            score_at_entry=score_at_entry,
+        )
+    except Exception as _exc:
+        log.warning("[EXIT_LEDGER] write failed for %s: %s", symbol, _exc)
+
     save_state(st)
     return pnl

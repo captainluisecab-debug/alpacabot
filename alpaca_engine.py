@@ -538,8 +538,22 @@ def _run_cycle(st, cycle: int) -> None:
         positions_str = ", ".join(
             f"{sym}@${pos.entry_price:.2f}" for sym, pos in st.positions.items()
         ) or "none"
-        # Expose live equity/peak on state so brain can read them
+        # Expose live equity/peak on state so brain can read them (legacy)
         st.equity = equity
+        # Canonical cross-sleeve fields for ALPACA_STATE_SCHEMA_UNIFY.
+        # Populated every cycle; persisted by save_state so supervisor /
+        # autonomy_guard / sentinel can read with the unified contract.
+        st.equity_usd = float(equity)
+        st.dd_pct = float(dd_pct)
+        try:
+            _unrealized = sum(
+                (snap.price - pos.entry_price) / pos.entry_price * pos.usd_invested
+                for sym, pos in st.positions.items()
+                if (snap := snapshots.get(sym)) is not None and pos.entry_price > 0
+            )
+        except Exception:
+            _unrealized = 0.0
+        st.unrealized_pnl_usd = float(_unrealized)
         # Local-first: skip brain API call when entries are blocked (zero value)
         if entry_ok:
             brain_run(st, cycle, positions_str)
