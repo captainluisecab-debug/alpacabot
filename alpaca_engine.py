@@ -583,6 +583,27 @@ def main() -> None:
             # ── Smart sleep when market is closed ───────────────────
             secs_to_open = _get_next_open()
             if secs_to_open > 0:
+                # Before sleeping, refresh canonical state fields once per
+                # closed session (ALPACA_STATE_SCHEMA_UNIFY). _run_cycle
+                # won't be invoked during closed hours, so without this the
+                # state file would freeze at its last open-hours snapshot.
+                try:
+                    _acct = get_account()
+                    if _acct is not None:
+                        _eq = float(_acct.equity)
+                        _un = float(getattr(_acct, "unrealized_pl", 0) or 0)
+                        if _eq > st.peak_equity:
+                            st.peak_equity = _eq
+                        _peak = st.peak_equity if st.peak_equity > 0 else _eq
+                        _dd = (_eq - _peak) / _peak * 100 if _peak > 0 else 0.0
+                        st.equity_usd = _eq
+                        st.unrealized_pnl_usd = _un
+                        st.dd_pct = _dd
+                        st.cycle = cycle
+                        save_state(st)
+                except Exception as _exc:
+                    log.warning("[CLOSED] canonical state refresh failed: %s", _exc)
+
                 # After-hours monitor — run once per closed session
                 if not after_hours_logged:
                     _after_hours_monitor()
@@ -592,9 +613,10 @@ def main() -> None:
                 sleep_secs  = max(60, secs_to_open - wake_buffer)
                 wake_time   = datetime.now(timezone.utc) + timedelta(seconds=sleep_secs)
                 log.info(
-                    "Market closed. Next open in %.1fh — sleeping until %s",
+                    "Market closed. Next open in %.1fh — sleeping until %s (eq=$%.2f dd=%.2f%%)",
                     secs_to_open / 3600,
                     wake_time.strftime("%H:%M UTC"),
+                    st.equity_usd, st.dd_pct,
                 )
                 time.sleep(sleep_secs)
                 continue
