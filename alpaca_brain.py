@@ -14,10 +14,19 @@ OVERRIDES_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alp
 DECISIONS_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_decisions.jsonl")
 
 PARAM_BOUNDS = {
-    "STOP_LOSS_PCT":   (2.5, 8.0),
-    "TAKE_PROFIT_PCT": (5.0, 15.0),
-    "TRADE_SIZE_USD":  (30.0, 200.0),  # Floor raised: below $30 wins can't cover slippage
-    "MAX_POSITIONS":   (2, 8),
+    "STOP_LOSS_PCT":      (2.5, 8.0),
+    "TAKE_PROFIT_PCT":    (5.0, 15.0),
+    "TRADE_SIZE_USD":     (30.0, 200.0),  # Floor raised: below $30 wins can't cover slippage
+    "MAX_POSITIONS":      (2, 8),
+    # Phase A parity (ALPACA_PARAM_BOUNDS_EXPAND). Magnitudes tuned for
+    # stock-market rhythm (hours-long holds, no rotation, market-hours only).
+    # TARGET_DEPLOY_PCT is engine-wired in A5; the other four are forward-
+    # compatible with A6 sentinel triggers + engine wiring.
+    "TARGET_DEPLOY_PCT":  (0.20, 0.80),   # fraction of equity deployed (capped)
+    "MIN_SCORE_TO_TRADE": (50.0, 95.0),   # entry-quality threshold (wired at A6)
+    "ROTATE_MIN_PNL_PCT": (0.005, 0.020), # forward-compat (no rotation path yet)
+    "TIME_STOP_SEC":      (1800, 86400),  # 30 min to 24 h; wired at A6
+    "MIN_HOLD_SEC":       (300, 3600),    # 5 min to 1 h protection; wired at A6
 }
 
 

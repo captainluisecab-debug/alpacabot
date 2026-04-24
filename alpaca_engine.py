@@ -565,6 +565,20 @@ def _run_cycle(st, cycle: int) -> None:
         save_state(st)
         return
 
+    # TARGET_DEPLOY_PCT cap (ALPACA_PARAM_BOUNDS_EXPAND wire).
+    # Autonomy loop / sentinel can tighten this (e.g., B12-port → 0.25 after
+    # a loss streak). Skips BUY loop if current deployed exposure already
+    # meets/exceeds the cap. Default 0.80 = permissive; no change from prior
+    # behavior unless sentinel writes an override.
+    _target_deploy_pct = float(overrides.get("TARGET_DEPLOY_PCT", 0.80))
+    _invested = sum(p.usd_invested for p in st.positions.values())
+    _deploy_cap_usd = equity * _target_deploy_pct
+    if _invested >= _deploy_cap_usd:
+        log.info("[CYCLE %d] Deploy cap reached — invested=$%.2f >= cap=$%.2f (%.0f%% of eq $%.2f) — no new buys",
+                 cycle, _invested, _deploy_cap_usd, _target_deploy_pct * 100, equity)
+        save_state(st)
+        return
+
     available_cash = cash - CASH_RESERVE_USD
     if available_cash < trade_size:
         log.info("[CYCLE %d] Insufficient cash ($%.2f) for new position", cycle, available_cash)
