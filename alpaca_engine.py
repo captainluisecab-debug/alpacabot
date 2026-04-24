@@ -246,13 +246,9 @@ def _run_cycle(st, cycle: int) -> None:
                      cycle, int(_mode_stable_sec // 60), int(_SUP_MODE_MIN_STABLE_SEC // 60))
         entry_ok = False if sup_mode != "NORMAL" else (entry_ok and _mode_stable_sec >= _SUP_MODE_MIN_STABLE_SEC)
 
-    # ── Market hours check ──────────────────────────────────────────
-    if not _is_market_open():
-        log.info("[CYCLE %d] Market closed — waiting", cycle)
-        save_state(st)
-        return
-
     # ── Account info ────────────────────────────────────────────────
+    # Fetched BEFORE market-closed check so canonical state fields stay fresh
+    # across overnight / weekend (one API call per closed-period wake is fine).
     account = get_account()
     if account is None:
         log.error("[CYCLE %d] Could not fetch account — skipping", cycle)
@@ -276,6 +272,13 @@ def _run_cycle(st, cycle: int) -> None:
     st.equity_usd = float(equity)
     st.unrealized_pnl_usd = float(unrealized)
     st.dd_pct = float(dd_pct)
+
+    # ── Market hours check (AFTER canonical state update) ──────────
+    if not _is_market_open():
+        log.info("[CYCLE %d] Market closed — waiting (equity=$%.2f dd=%.2f%%)",
+                 cycle, equity, dd_pct)
+        save_state(st)
+        return
 
     # Dynamic baseline: use peak equity as baseline so pnl% reflects drawdown from ATH
     baseline = peak if peak > 0 else equity
