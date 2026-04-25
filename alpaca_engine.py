@@ -54,6 +54,7 @@ from alpaca_broker import buy_notional, get_account, get_positions, sell_all
 from alpaca_state import load_state, record_buy, record_sell, save_state
 from alpaca_brain import run_brain as brain_run, load_overrides as brain_overrides
 from alpaca_brain import PARAM_BOUNDS as ALPACA_PARAM_BOUNDS
+from alpaca_market_sense import allow_entry as _market_sense_allow_entry
 
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
@@ -477,6 +478,17 @@ def _run_cycle(st, cycle: int) -> None:
             _pair_regime[_sym] = "RANGING"
     st.pair_regime = _pair_regime
 
+    # ── Compute SPY intraday change for market_sense gate (A7) ───────
+    _spy_pct_today = None
+    try:
+        _spy_snap = snapshots.get("SPY")
+        if _spy_snap and _spy_snap.bars and len(_spy_snap.bars) >= 2:
+            _prev_close = _spy_snap.bars[-2].close
+            if _prev_close > 0:
+                _spy_pct_today = (_spy_snap.price - _prev_close) / _prev_close * 100
+    except Exception:
+        _spy_pct_today = None
+
     # ── After-hours risk sell — execute armed sells from overnight monitor ──
     global _after_hours_sell_armed
     for _armed_sym in list(_after_hours_sell_armed):
@@ -625,6 +637,14 @@ def _run_cycle(st, cycle: int) -> None:
             break
         if not entry_ok:
             break
+        # A7: market_sense composite gate — market hours, lunch chop,
+        # SPY drift, force-flat window. Earnings stub. Most fundamental
+        # market checks; runs first so other gates only fire on entries
+        # that already pass the basic timing tests.
+        _ms = _market_sense_allow_entry(sym, spy_pct_today=_spy_pct_today)
+        if not _ms.allow:
+            log.info("[CYCLE %d] %s skipped by market_sense: %s", cycle, sym, _ms.reason)
+            continue
         # Pair-status ladder: skip if autonomy loop / sentinel has this
         # ticker in COOLDOWN/PROBATION/DISABLED_SOFT (TTL-bounded)
         if sym in pair_status_blocked:
