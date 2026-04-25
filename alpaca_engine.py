@@ -286,6 +286,11 @@ def _run_cycle(st, cycle: int) -> None:
     take_profit  = overrides.get("TAKE_PROFIT_PCT", TAKE_PROFIT_PCT)
     trade_size   = overrides.get("TRADE_SIZE_USD",  TRADE_SIZE_USD)
     max_pos      = int(overrides.get("MAX_POSITIONS", MAX_POSITIONS))
+    # A6b wires — defaults are permissive (no behavior change).
+    # Sentinel B12-port writes tighter values during loss streaks.
+    min_score    = float(overrides.get("MIN_SCORE_TO_TRADE", 50.0))
+    time_stop    = int(overrides.get("TIME_STOP_SEC", 0))
+    min_hold     = int(overrides.get("MIN_HOLD_SEC",  0))
 
     # ── Pair status ladder — COOLDOWN/PROBATION/DISABLED_SOFT blocks.
     # Parity with enzobot's pair_status.json. Additional per-ticker
@@ -523,6 +528,8 @@ def _run_cycle(st, cycle: int) -> None:
             stop_loss_pct=_eff_stop,
             take_profit_pct=_eff_tp,
             hold_sec=_hold_sec_alp,
+            time_stop_sec=time_stop,   # A6b wire
+            min_hold_sec=min_hold,     # A6b wire
         )
         if signal.action == "SELL":
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
@@ -622,6 +629,13 @@ def _run_cycle(st, cycle: int) -> None:
         # ticker in COOLDOWN/PROBATION/DISABLED_SOFT (TTL-bounded)
         if sym in pair_status_blocked:
             log.info("[CYCLE %d] %s blocked by pair_status — skipping", cycle, sym)
+            continue
+        # A6b: MIN_SCORE_TO_TRADE gate — reject signals below threshold.
+        # Default 50 (permissive). Sentinel B12-port writes 88 to reject
+        # marginal entries during loss streaks.
+        if min_score > 0 and float(getattr(signal, "score", 0.0)) < min_score:
+            log.info("[CYCLE %d] %s skipped: score %.0f < min_score %.0f",
+                     cycle, sym, getattr(signal, "score", 0.0), min_score)
             continue
         # Stop-loss strike block: skip if symbol is blocked this cycle
         if sym in st.blocked_until and cycle < st.blocked_until[sym]:
