@@ -205,6 +205,56 @@ def get_intraday_bars_today(symbol: str) -> List[Bar]:
     return bars
 
 
+def get_intraday_bars(symbol: str, minutes: int, num_bars: int) -> List[Bar]:
+    """Fetch recent N bars at the given minute timeframe. Used by brain classifier.
+
+    Estimates days-back from session length (~390 min/day) plus buffer for
+    weekends/holidays. Returns last `num_bars` after fetch+sort.
+    """
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+    client = _client()
+    end = datetime.now(timezone.utc)
+    sessions_needed = (minutes * num_bars) / 390.0
+    days_back = max(2, int(sessions_needed * 1.6) + 1)
+    start = end - timedelta(days=days_back)
+
+    if minutes >= 60 and minutes % 60 == 0:
+        tf = TimeFrame(minutes // 60, TimeFrameUnit.Hour)
+    else:
+        tf = TimeFrame(minutes, TimeFrameUnit.Minute)
+
+    req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=tf,
+                           start=start, end=end, feed="iex")
+    try:
+        resp = _retry_fetch(client.get_stock_bars, req)
+        raw = resp.data.get(symbol, [])
+    except Exception as exc:
+        log.warning("get_intraday_bars(%s, %dm, %d) failed: %s",
+                    symbol, minutes, num_bars, exc)
+        return []
+
+    bars = []
+    for b in raw:
+        bars.append(Bar(
+            ts=b.timestamp,
+            open=float(b.open),
+            high=float(b.high),
+            low=float(b.low),
+            close=float(b.close),
+            volume=float(b.volume),
+        ))
+    bars.sort(key=lambda x: x.ts)
+    return bars[-num_bars:] if len(bars) > num_bars else bars
+
+
+def bars_to_classifier_dicts(bars: List[Bar]) -> List[Dict]:
+    """Convert Bar dataclasses to {o,h,l,c,v} dicts for classifier input."""
+    return [{"o": b.open, "h": b.high, "l": b.low,
+             "c": b.close, "v": b.volume} for b in bars]
+
+
 def get_bars(symbol: str, days: int = 60) -> List[Bar]:
     """Fetch daily OHLCV bars for a symbol."""
     from alpaca.data.requests import StockBarsRequest

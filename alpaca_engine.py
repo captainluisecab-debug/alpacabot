@@ -598,6 +598,19 @@ def _run_cycle(st, cycle: int) -> None:
         save_state(st)
         return
 
+    # Brain wiring config — feature flag read fresh each cycle.
+    # Default ON when file missing. Kill switch: write
+    # {"USE_ALPACA_BRAIN": false} to alpaca_brain_wiring.json.
+    _wiring_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "alpaca_brain_wiring.json")
+    _use_brain = True
+    try:
+        if os.path.exists(_wiring_path):
+            with open(_wiring_path, encoding="utf-8") as _wf:
+                _use_brain = bool(json.load(_wf).get("USE_ALPACA_BRAIN", True))
+    except Exception:
+        _use_brain = True
+
     available_cash = cash - CASH_RESERVE_USD
     if available_cash < trade_size:
         log.info("[CYCLE %d] Insufficient cash ($%.2f) for new position", cycle, available_cash)
@@ -667,13 +680,66 @@ def _run_cycle(st, cycle: int) -> None:
             st.blocked_until.pop(sym, None)
             st.stop_loss_strikes.pop(sym, None)
 
-        trade_usd = trade_size_override * size_mult
+        # Brain decision (alpaca_path_classifier + alpaca_trader).
+        # Runs after safety gates pass. SKIP = veto (continue);
+        # BUY = use detail['size_mult'] as additional sizing multiplier.
+        # Errors fall through to legacy with size_mult=1.0.
+        _brain_size_mult = 1.0
+        _brain_reason = ""
+        if _use_brain:
+            try:
+                from alpaca_data import get_intraday_bars, bars_to_classifier_dicts
+                from alpaca_path_classifier import classify_path
+                from alpaca_trader import decide_entry as _brain_decide
+                _b5  = get_intraday_bars(sym, 5,  60)
+                _b15 = get_intraday_bars(sym, 15, 50)
+                _b1h = get_intraday_bars(sym, 60, 100)
+                _cls = classify_path(
+                    sym,
+                    bars_to_classifier_dicts(_b5),
+                    bars_to_classifier_dicts(_b15),
+                    bars_to_classifier_dicts(_b1h),
+                    prior_state=None,
+                )
+                _classifier_result = {
+                    "state": _cls.state,
+                    "confidence": float(_cls.confidence),
+                    "reasons": list(_cls.reasons),
+                }
+                try:
+                    snap.score = float(getattr(signal, "score", 0.0))
+                except Exception:
+                    pass
+                _action, _detail = _brain_decide(
+                    sym, snap, _classifier_result, None,
+                    st.positions, max_pos,
+                )
+                if _action == "BUY" and isinstance(_detail, dict):
+                    _brain_size_mult = float(_detail.get("size_mult", 1.0))
+                    _brain_reason = str(_detail.get("reason", ""))
+                    log.info("[CYCLE %d] [BRAIN] %s BUY %s | %s",
+                             cycle, sym, _cls.state, _brain_reason)
+                else:
+                    log.info("[CYCLE %d] [BRAIN] %s SKIP (state=%s conf=%.2f): %s",
+                             cycle, sym, _cls.state, _cls.confidence, _detail)
+                    continue
+            except Exception as _bex:
+                log.warning("[CYCLE %d] [BRAIN] %s error — falling back to legacy: %s",
+                            cycle, sym, _bex)
+                _brain_size_mult = 1.0
+                _brain_reason = ""
+
+        MIN_TRADE_USD = 30.0
+        trade_usd = max(MIN_TRADE_USD,
+                        trade_size_override * size_mult * _brain_size_mult)
         available_cash = cash - CASH_RESERVE_USD - (open_count * trade_usd)
         if available_cash < trade_usd:
             break
 
+        _full_reason = (signal.reason if not _brain_reason
+                        else (signal.reason + " | " + _brain_reason))
         log.info("[CYCLE %d] BUY %s @ $%.2f | rsi=%.1f reason=%s (size=$%.0f sup=%s)",
-                 cycle, sym, snap.price, snap.rsi, signal.reason, trade_usd, sup_mode)
+                 cycle, sym, snap.price, snap.rsi, _full_reason, trade_usd, sup_mode)
         fill = buy_notional(sym, trade_usd)
         if fill:
             fill_price = float(fill.get("filled_avg_price") or snap.price)
