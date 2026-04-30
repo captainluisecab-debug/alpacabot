@@ -37,6 +37,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("alpaca_engine")
 
+# Color highlighting for stdout (file handler stays plain)
+try:
+    sys.path.insert(0, r"C:\Projects")
+    from log_colors import attach_color_formatter
+    attach_color_formatter(logging.getLogger())
+except Exception:
+    pass
+
 from alpaca_settings import (
     CASH_RESERVE_USD,
     CYCLE_SEC,
