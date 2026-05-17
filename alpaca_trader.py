@@ -48,7 +48,7 @@ SYMBOL_CONFIG: Dict[str, Dict[str, float]] = {
         'stop_atr_mult': 1.5, 'min_classifier_conf': 0.5, 'edge_weight': 1.0,
     },
     'TSLA': {
-        'size_mult_full': 0.7, 'size_mult_reduced': 0.4,
+        'size_mult_full': 1.0, 'size_mult_reduced': 0.4,
         'stop_atr_mult': 1.8, 'min_classifier_conf': 0.55, 'edge_weight': 0.95,  # higher vol
     },
     'QQQ': {
@@ -62,15 +62,15 @@ SYMBOL_CONFIG: Dict[str, Dict[str, float]] = {
     },
     # NEUTRAL (no recent trades, moderate conviction)
     'AAPL': {
-        'size_mult_full': 0.8, 'size_mult_reduced': 0.5,
+        'size_mult_full': 1.0, 'size_mult_reduced': 0.5,
         'stop_atr_mult': 1.6, 'min_classifier_conf': 0.55, 'edge_weight': 1.0,
     },
     'AMZN': {
-        'size_mult_full': 0.7, 'size_mult_reduced': 0.4,
+        'size_mult_full': 1.0, 'size_mult_reduced': 0.4,
         'stop_atr_mult': 1.7, 'min_classifier_conf': 0.55, 'edge_weight': 0.95,
     },
     'AMD': {
-        'size_mult_full': 0.7, 'size_mult_reduced': 0.4,
+        'size_mult_full': 1.0, 'size_mult_reduced': 0.4,
         'stop_atr_mult': 1.8, 'min_classifier_conf': 0.6, 'edge_weight': 0.9,  # higher vol
     },
 }
@@ -128,7 +128,11 @@ def decide_entry(symbol: str, snap, classifier_result: Optional[Dict[str, Any]],
     else:
         base_mult = sym_cfg.get('size_mult_reduced', 0.4)
 
-    if score >= 80:
+    # GAMMA-2026-05-08: treat score=0 as "unscored" (compute_signal didn't fire);
+    # preserves [50,60) trend_ride scores at boost=0.55 — only score<=0 promoted to 1.0
+    if score <= 0.0:
+        score_boost = 1.0
+    elif score >= 80:
         score_boost = 1.0
     elif score >= 70:
         score_boost = 0.85
