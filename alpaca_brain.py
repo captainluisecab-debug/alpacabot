@@ -163,26 +163,48 @@ Only include parameters that need changing. Empty changes={{}} means no change n
     except Exception as _exc:
         log.warning("[BRAIN] Adaptive review failed: %s", _exc)
 
-    # Audit trail — record every brain decision, including no-change
-    try:
-        with open(DECISIONS_FILE, "a", encoding="utf-8") as _f:
-            _f.write(json.dumps({
-                "ts":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "cycle":      cycle,
-                "old_params": current or {},
-                "new_params": new_overrides,
-                "reasoning":  reasoning,
-                "source":     _brain_source,
-            }) + "\n")
-    except Exception as _e:
-        log.warning("alpaca_brain_decisions write failed: %s", _e)
+    # Compute full effective delta: post-Opus in-memory vs disk baseline.
+    # This catches BOTH local-rule changes AND Opus mutations applied via
+    # apply_recommendations(). Bug fix 2026-05-08: prior code iterated `changes`
+    # (rule-only) and seeded _allowed_overrides from `current`, then clobbered
+    # new_overrides at end of guard block — Opus mutations were silently dropped.
+    _baseline = current or {}
+    effective_changes = {
+        k: v for k, v in (new_overrides or {}).items()
+        if k not in _baseline or _baseline.get(k) != v
+    }
 
-    if not changes:
+    # Surface the discard delta: keys present in effective_changes but not in
+    # `changes` are Opus-driven mutations the OLD code would have silently
+    # dropped. After fix, this log line should NEVER fire — they should all
+    # flow through the guard. If it does fire, it means the guard rejected
+    # Opus mutations (which is correct safety behavior, but worth surfacing).
+    _opus_only = [k for k in effective_changes if k not in (changes or {})]
+    if _opus_only:
+        log.info("[BRAIN] guard evaluating %d Opus-only changes: %s",
+                 len(_opus_only), _opus_only)
+
+    if not effective_changes:
         log.info("[BRAIN] cycle=%d no parameter changes needed | %s", cycle, reasoning)
+        # Audit trail — record no-change cycle (post-guard semantics).
+        try:
+            with open(DECISIONS_FILE, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({
+                    "ts":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "cycle":      cycle,
+                    "old_params": _baseline,
+                    "new_params": _baseline,
+                    "reasoning":  reasoning,
+                    "source":     _brain_source,
+                }) + "\n")
+        except Exception as _e:
+            log.warning("alpaca_brain_decisions write failed: %s", _e)
         return None
 
     # Autonomy guard — per-param pre-write check + attribution logging.
-    # Drops any changes that violate rate limit, oscillation, or freeze.
+    # Iterates effective_changes (rule + Opus deltas) so Opus mutations
+    # get guarded too. Drops any change that violates rate limit, oscillation,
+    # or freeze.
     try:
         import sys as _sys
         if r"C:\Projects\supervisor" not in _sys.path:
@@ -191,37 +213,57 @@ Only include parameters that need changing. Empty changes={{}} means no change n
         equity_val = float(getattr(state, "equity", 0) or 0)
         realized   = float(getattr(state, "realized_pnl_usd", 0) or 0)
         regime     = None  # alpaca has pair-level regime, no single dominant
-        _allowed_overrides = dict(current or {})
-        for k, new_v in changes.items():
+        _allowed_overrides = dict(_baseline)
+        for k, new_v in effective_changes.items():
             if k in PARAM_BOUNDS:
                 lo, hi = PARAM_BOUNDS[k]
                 clamped = max(lo, min(hi, float(new_v)))
                 if k == "MAX_OPEN_POSITIONS":
                     clamped = int(clamped)
-                before_v = float((current or {}).get(k, clamped))
-                ok, why = _ag_pre(
-                    bot="alpaca", param=k, before=before_v, after=float(clamped),
-                    hypothesis=reasoning,
-                    expected_impact_usd=abs(equity_val) * 0.001,
-                    equity_usd=equity_val, regime=regime,
-                    trigger="alpaca_brain",
-                    bypass_attribution=False,
-                )
-                if not ok:
-                    log.warning("[BRAIN] param %s BLOCKED by autonomy_guard: %s", k, why)
+                before_v = float(_baseline.get(k, clamped))
+                try:
+                    ok, why = _ag_pre(
+                        bot="alpaca", param=k, before=before_v, after=float(clamped),
+                        hypothesis=reasoning,
+                        expected_impact_usd=abs(equity_val) * 0.001,
+                        equity_usd=equity_val, regime=regime,
+                        trigger="alpaca_brain",
+                        bypass_attribution=False,
+                    )
+                    if not ok:
+                        log.warning("[BRAIN] param %s BLOCKED by autonomy_guard: %s", k, why)
+                        continue
+                    _allowed_overrides[k] = clamped
+                    _ag_rec(
+                        bot="alpaca", param=k, before=before_v, after=float(clamped),
+                        hypothesis=reasoning,
+                        expected_impact_usd=abs(equity_val) * 0.001,
+                        equity_usd=equity_val, regime=regime,
+                        trigger="alpaca_brain",
+                        realized_pnl_t0=realized,
+                    )
+                except Exception as _e_inner:
+                    log.warning("[BRAIN] guard error for %s: %s — skipping", k, _e_inner)
                     continue
-                _allowed_overrides[k] = clamped
-                _ag_rec(
-                    bot="alpaca", param=k, before=before_v, after=float(clamped),
-                    hypothesis=reasoning,
-                    expected_impact_usd=abs(equity_val) * 0.001,
-                    equity_usd=equity_val, regime=regime,
-                    trigger="alpaca_brain",
-                    realized_pnl_t0=realized,
-                )
         new_overrides = _allowed_overrides
     except Exception as _agexc:
-        log.warning("[BRAIN] autonomy_guard integration failed: %s — writing unguarded", _agexc)
+        log.warning("[BRAIN] autonomy_guard outer error: %s — writing unguarded", _agexc)
+
+    # Audit trail — record AFTER the guard loop so new_params reflects what
+    # actually gets persisted (post-guard, post-block). Prior placement before
+    # the guard loop made decisions JSONL lie about persistence.
+    try:
+        with open(DECISIONS_FILE, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "ts":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "cycle":      cycle,
+                "old_params": _baseline,
+                "new_params": new_overrides,
+                "reasoning":  reasoning,
+                "source":     _brain_source,
+            }) + "\n")
+    except Exception as _e:
+        log.warning("alpaca_brain_decisions write failed: %s", _e)
 
     save_overrides(new_overrides)
     log.info("[BRAIN] cycle=%d overrides updated: %s | %s", cycle, new_overrides, reasoning)

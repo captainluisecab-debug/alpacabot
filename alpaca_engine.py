@@ -59,7 +59,7 @@ from alpaca_settings import (
 from alpaca_data import get_all_snapshots
 from alpaca_strategy import compute_signal
 from alpaca_broker import buy_notional, get_account, get_positions, sell_all
-from alpaca_state import load_state, record_buy, record_sell, save_state
+from alpaca_state import load_state, record_buy, record_sell, save_state, sample_postexit
 from alpaca_brain import run_brain as brain_run, load_overrides as brain_overrides
 from alpaca_brain import PARAM_BOUNDS as ALPACA_PARAM_BOUNDS
 from alpaca_market_sense import allow_entry as _market_sense_allow_entry
@@ -330,6 +330,13 @@ def _run_cycle(st, cycle: int) -> None:
             snap = snapshots.get(sym) if snapshots else None
             pos_before = st.positions.get(sym)
             fill = sell_all(sym)
+            # PDT-aware guard: tagged dict from broker means PDT block. Skip
+            # phantom record_sell. Governor force-flatten gets loud error log.
+            if isinstance(fill, dict) and fill.get("error") == "pdt_block":
+                log.error("[CYCLE %d] GOVERNOR FORCE_FLATTEN %s BLOCKED by PDT — "
+                          "sub-$25k account limit reached; position remains open",
+                          cycle, sym)
+                continue
             if fill:
                 fill_price = float(fill.get("filled_avg_price") or (snap.price if snap else 0))
                 proceeds = float(pos_before.usd_invested) if pos_before else 0.0
@@ -411,17 +418,22 @@ def _run_cycle(st, cycle: int) -> None:
         st.total_trades, win_rate,
     )
 
+    # Per-trade size = equity × TARGET_DEPLOY_PCT / max_pos (Kraken-LIVE
+    # mirror of risk_one.py:51-101; auto-compounds with equity growth).
+    # Operator-approved 2026-05-07 Option B. Replaces fixed-$ trade_size.
+    _target_deploy_pct = float(overrides.get("TARGET_DEPLOY_PCT", 0.80))
+    _pct_per_slot = equity * _target_deploy_pct / max(1, max_pos)
     # ── Drawdown guard — scale or pause entries based on dd_pct ─────
     entry_size_from_dd: float
     if dd_pct <= -8.0:
         entry_ok = False
-        entry_size_from_dd = trade_size
+        entry_size_from_dd = _pct_per_slot
         log.warning("[CYCLE %d] DD guard: portfolio dd=%.1f%% — entries paused", cycle, dd_pct)
     elif dd_pct <= -5.0:
-        entry_size_from_dd = trade_size * 0.5
+        entry_size_from_dd = _pct_per_slot * 0.5
         log.info("[CYCLE %d] DD guard: portfolio dd=%.1f%% — half size", cycle, dd_pct)
     else:
-        entry_size_from_dd = trade_size
+        entry_size_from_dd = _pct_per_slot
     trade_size_override = entry_size_from_dd
 
     # ── Fetch live positions from Alpaca ────────────────────────────
@@ -444,6 +456,7 @@ def _run_cycle(st, cycle: int) -> None:
                 st.positions[sym] = Position(
                     symbol=sym, entry_price=_entry,
                     entry_ts=int(time.time()), usd_invested=round(_cost, 2),
+                    _entry_signal="orphan_recovery",
                 )
                 log.warning("[SYNC] %s on Alpaca but not local — added (entry=$%.2f qty=%.4f)",
                             sym, _entry, _qty)
@@ -469,6 +482,14 @@ def _run_cycle(st, cycle: int) -> None:
         log.warning("[CYCLE %d] No snapshots available — skipping", cycle)
         save_state(st)
         return
+
+    # Post-exit forward-price sampling (OBSERVABILITY ONLY — no trading logic).
+    # Piggybacks on snapshots already fetched this cycle; never raises into the
+    # trade path. Per _opus_plan_alpaca_postexit_tracking.md.
+    try:
+        sample_postexit(cycle, lambda _s: (snapshots[_s].price if _s in snapshots else None))
+    except Exception as _exc:
+        log.warning("[POSTEXIT] sample call failed: %s", _exc)
 
     # Classify per-symbol regime from current indicators and persist to
     # state so the supervisor can read a stock-market regime that's
@@ -505,6 +526,13 @@ def _run_cycle(st, cycle: int) -> None:
             if snap and snap.price > 0:
                 log.warning("[CYCLE %d] AFTER-HOURS SELL ARMED: %s — executing at market open", cycle, _armed_sym)
                 fill = sell_all(_armed_sym)
+                # PDT-aware guard: tagged dict from broker means PDT block.
+                # Skip phantom record_sell. After-hours risk exit denied loudly.
+                if isinstance(fill, dict) and fill.get("error") == "pdt_block":
+                    log.error("[CYCLE %d] AFTER-HOURS SELL %s BLOCKED by PDT — "
+                              "armed risk exit denied; remains armed for next open",
+                              cycle, _armed_sym)
+                    continue
                 if fill:
                     fill_price = float(fill.get("filled_avg_price") or snap.price)
                     pnl = record_sell(st, _armed_sym, fill_price, reason="after_hours_risk")
@@ -519,9 +547,74 @@ def _run_cycle(st, cycle: int) -> None:
                         pass
     _after_hours_sell_armed.clear()
 
+    # ── EOD posture decision (Step 7 — Alpaca→Kraken parity, prevents PDT corner) ──
+    # At 15:50-15:55 ET, evaluate held positions BEFORE final 5-min close window.
+    # CARRY: profit-locked, decent gain, portfolio not in deep dd → hold overnight.
+    # FLATTEN: not profit-locked OR earnings imminent → close while broker still allows.
+    # The set of FLATTEN decisions is consumed inside the SELL loop below to
+    # synthesize SELL signals that override compute_signal output.
+    _eod_flatten_set = set()
+    try:
+        from alpaca_eod_posture import is_eod_decision_window, decide_eod_posture
+        from alpaca_market_sense import _et_now as _ms_et_now
+        _et = _ms_et_now()
+        if is_eod_decision_window(_et):
+            _eod_summary = []
+            for _esym, _epos in st.positions.items():
+                _esnap = snapshots.get(_esym)
+                if not _esnap or not getattr(_esnap, "price", 0):
+                    continue
+                _epnl_pct = ((_esnap.price - _epos.entry_price) / _epos.entry_price * 100
+                             if _epos.entry_price > 0 else 0.0)
+                _decision, _ereason = decide_eod_posture(
+                    symbol=_esym,
+                    pnl_pct=_epnl_pct,
+                    in_breakeven_armed=(_esym in st.breakeven_armed),
+                    total_dd_pct=dd_pct,
+                )
+                _eod_summary.append(f"{_esym}={_decision}({_epnl_pct:+.1f}%)")
+                if _decision == "FLATTEN":
+                    _eod_flatten_set.add(_esym)
+                    # PDT awareness: log loud if FLATTEN target is already
+                    # PDT-blocked for today — operator should see that the
+                    # symbol will roll overnight unintentionally.
+                    _pdt_today = (st.meta.get("pdt_blocked_today") or {}).get(_esym)
+                    _today_et_str = _et.strftime("%Y-%m-%d")
+                    if _pdt_today == _today_et_str:
+                        log.info("[CYCLE %d] [EOD] %s PDT-BLOCKED holding overnight "
+                                 "(breaks symmetry, expected for sub-$25k accounts)",
+                                 cycle, _esym)
+            if _eod_summary:
+                log.info("[CYCLE %d] [EOD] decisions: %s", cycle, " ".join(_eod_summary))
+    except Exception as _eod_ex:
+        log.warning("[CYCLE %d] [EOD] posture eval failed: %s", cycle, _eod_ex)
+
+    # ── PDT-block date-rollover clear ──────────────────────────────
+    # st.meta["pdt_blocked_today"] = {sym: "YYYY-MM-DD"}. If the stored ET
+    # date != today's ET date, drop the entry — next RTH session is fresh.
+    # Single revertable line: comment out the assignment to disable the gate.
+    try:
+        from alpaca_market_sense import _et_now as _ms_et_now2
+        _today_et = _ms_et_now2().strftime("%Y-%m-%d")
+        _pdt_map = st.meta.get("pdt_blocked_today") or {}
+        _stale = [s for s, d in _pdt_map.items() if d != _today_et]
+        for _s in _stale:
+            _pdt_map.pop(_s, None)
+            log.info("[CYCLE %d] [PDT] %s block cleared (date rollover)", cycle, _s)
+        if _pdt_map:
+            st.meta["pdt_blocked_today"] = _pdt_map
+        elif "pdt_blocked_today" in st.meta:
+            st.meta["pdt_blocked_today"] = {}
+    except Exception as _pdt_ex:
+        log.warning("[CYCLE %d] [PDT] rollover-clear failed: %s", cycle, _pdt_ex)
+
     # ── SELL loop — check exits first ──────────────────────────────
     BREAKEVEN_TRIGGER_PCT = 1.5   # move stop to breakeven when unrealized >= this %
     BREAKEVEN_STOP_PCT    = 0.1   # effective stop after breakeven trigger (small buffer)
+    REENTRY_COOLDOWN_SEC  = 300   # PREMONDAY 2026-05-17: per-symbol cooldown
+                                   # after non-stop_loss exit. Kills AMD-style 63s
+                                   # chains. 5 min gives real market separation
+                                   # vs 60s boundary.
 
     for sym, pos in list(st.positions.items()):
         snap = snapshots.get(sym)
@@ -530,6 +623,12 @@ def _run_cycle(st, cycle: int) -> None:
 
         # Profit-lock: once position reaches +1.5%, arm breakeven permanently until exit
         _pnl_now = (snap.price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0.0
+        # F-1 v3 (2026-05-20): track actual peak since entry. Replaces
+        # alpaca_strategy.py bars[-20:] computation that included daily-bar
+        # highs from BEFORE entry. Updated BEFORE trail evaluation (which
+        # happens inside compute_signal a few lines below).
+        if _pnl_now > pos.peak_pnl_pct:
+            pos.peak_pnl_pct = _pnl_now
         if _pnl_now >= BREAKEVEN_TRIGGER_PCT and sym not in st.breakeven_armed:
             st.breakeven_armed.add(sym)
             log.info("[CYCLE %d] %s profit-lock ARMED: pnl=%.1f%% — breakeven stop locked until exit",
@@ -550,16 +649,74 @@ def _run_cycle(st, cycle: int) -> None:
             hold_sec=_hold_sec_alp,
             time_stop_sec=time_stop,   # A6b wire
             min_hold_sec=min_hold,     # A6b wire
+            peak_pnl_pct_actual=pos.peak_pnl_pct,  # F-1 v3: real peak since entry
         )
+        # Step 7 (Alpaca→Kraken parity): EOD posture override.
+        # If pre-SELL decision was FLATTEN, force SELL regardless of compute_signal.
+        # Reason: at 15:50-15:55 ET we still have broker access; waiting for
+        # compute_signal's breakeven_stop trigger may push the sell into the
+        # final 5-min window where PDT protection blocks the order.
+        if sym in _eod_flatten_set and signal.action != "SELL":
+            from types import SimpleNamespace
+            signal = SimpleNamespace(action="SELL", reason="eod_posture_flatten")
         if signal.action == "SELL":
+            # ── PDT-block gate ──────────────────────────────────────────
+            # If sym was PDT-blocked earlier today, skip the broker call to
+            # avoid log noise + wasted API hits. SAFETY: always attempt the
+            # sell if reason contains "stop_loss" — operator wants to know
+            # if even a real risk exit is blocked. Substring match (lower)
+            # mirrors record_sell's own convention (alpaca_state.py).
+            try:
+                from alpaca_market_sense import _et_now as _ms_et_now3
+                _today_et_sl = _ms_et_now3().strftime("%Y-%m-%d")
+            except Exception:
+                _today_et_sl = ""
+            _pdt_map_sl = st.meta.get("pdt_blocked_today") or {}
+            _is_pdt_blocked = _pdt_map_sl.get(sym) == _today_et_sl
+            _is_stop_loss = "stop_loss" in (signal.reason or "").lower()
+            # PREMONDAY 2026-05-17 fix: once-per-session — stop_loss carve-out
+            # removed. 653 wasted sell-attempts pre-fix (NVDA 315, AMD 216).
+            # PDT block is binding for rest of session regardless of exit reason.
+            if _is_pdt_blocked:
+                if _is_stop_loss:
+                    log.error("[CYCLE %d] [PDT] %s STOP_LOSS sell skipped — "
+                              "broker PDT-blocked earlier today; position rolling.",
+                              cycle, sym)
+                else:
+                    log.info("[CYCLE %d] [PDT] %s sell skipped (blocked until next session)",
+                             cycle, sym)
+                continue
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
             fill = sell_all(sym)
+            # PDT detection on the response — broker returns
+            # {"error": "pdt_block", ...} for 40310100. Mark the symbol so
+            # subsequent cycles skip the broker call (gate above). For
+            # stop_loss reasons, log loud — operator wants to know.
+            if isinstance(fill, dict) and fill.get("error") == "pdt_block":
+                _pdt_map_sl = st.meta.setdefault("pdt_blocked_today", {})
+                _pdt_map_sl[sym] = _today_et_sl
+                if _is_stop_loss:
+                    log.error("[CYCLE %d] [PDT] %s STOP_LOSS sell BLOCKED — "
+                              "real risk exit denied by Alpaca PDT (sub-$25k). "
+                              "Position will roll until next session OR price recovers.",
+                              cycle, sym)
+                else:
+                    log.warning("[CYCLE %d] [PDT] %s sell denied (40310100); "
+                                "marked blocked_today=%s — will skip until next RTH",
+                                cycle, sym, _today_et_sl)
+                save_state(st)
+                continue
             if fill:
                 fill_price = float(fill.get("filled_avg_price") or snap.price)
                 proceeds = pos.usd_invested  # approximate; record_sell computes true pnl
                 pnl = record_sell(st, sym, fill_price, reason=signal.reason)
                 log.info("[CYCLE %d] %s sold | pnl=$%.2f | realized_total=$%.2f",
                          cycle, sym, pnl, st.realized_pnl_usd)
+                # PREMONDAY 2026-05-17: stamp last_exit_ts for non-stop_loss
+                # exits. BUY loop enforces REENTRY_COOLDOWN_SEC. Stop_loss
+                # exits use separate strike-block ladder (st.blocked_until).
+                if "stop_loss" not in (signal.reason or "").lower():
+                    st.meta.setdefault("last_exit_ts", {})[sym] = int(time.time())
                 try:
                     from alpaca_outcome_analyzer import log_trade as _log_outcome
                     _hold = int(time.time()) - pos.entry_ts if pos.entry_ts > 0 else 0
@@ -620,7 +777,7 @@ def _run_cycle(st, cycle: int) -> None:
         _use_brain = True
 
     available_cash = cash - CASH_RESERVE_USD
-    if available_cash < trade_size:
+    if available_cash < trade_size_override:
         log.info("[CYCLE %d] Insufficient cash ($%.2f) for new position", cycle, available_cash)
         save_state(st)
         return
@@ -637,7 +794,82 @@ def _run_cycle(st, cycle: int) -> None:
     except Exception:
         pass
 
-    # Score all symbols: rank by RSI ascending (most oversold first)
+    # ── Trader pre-pass (BRAIN-LEAD) — Step 1 of Alpaca→Kraken parity (2026-04-30) ──
+    # Mirrors enzobot/engine.py:1300-1316 trader-primary pattern. When _use_brain=True,
+    # run alpaca_path_classifier + alpaca_trader.decide_entry for every snap-eligible
+    # symbol BEFORE legacy compute_signal. Trader-BUY symbols become primary candidates;
+    # trader-SKIP symbols veto legacy BUY.
+    trader_candidates = {}   # sym -> {"snap","classifier","detail"}
+    trader_skip_seen = {}    # sym -> reason (suppresses legacy BUY for same sym)
+    _legacy_signals = {}     # sym -> Signal (Step 1.5: cache so candidate-builder reuses)
+    if _use_brain:
+        try:
+            from alpaca_data import get_intraday_bars, bars_to_classifier_dicts
+            from alpaca_path_classifier import classify_path
+            from alpaca_trader import decide_entry as _trader_decide
+        except Exception as _imp_ex:
+            log.warning("[CYCLE %d] [BRAIN] pre-pass import error — legacy only: %s",
+                        cycle, _imp_ex)
+        else:
+            for _sym, _snap in snapshots.items():
+                if _sym in st.positions or _sym in _analyzer_blocks:
+                    continue
+                try:
+                    # Step 1.5 (Alpaca→Kraken parity): pre-compute legacy score
+                    # and attach to snap so alpaca_trader.decide_entry's
+                    # score_boost formula gets proper input. Without this,
+                    # snap.score=0 → score_boost=0.55x → trades hit MIN_TRADE_USD floor.
+                    try:
+                        _legacy_sig = compute_signal(_snap, open_position=False,
+                                                     stop_loss_pct=stop_loss,
+                                                     take_profit_pct=take_profit)
+                        _legacy_signals[_sym] = _legacy_sig
+                        try:
+                            _snap.score = float(getattr(_legacy_sig, "score", 0.0))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    _b5  = get_intraday_bars(_sym, 5,  60)
+                    _b15 = get_intraday_bars(_sym, 15, 50)
+                    _b1h = get_intraday_bars(_sym, 60, 100)
+                    _cls = classify_path(
+                        _sym,
+                        bars_to_classifier_dicts(_b5),
+                        bars_to_classifier_dicts(_b15),
+                        bars_to_classifier_dicts(_b1h),
+                        prior_state=None,
+                    )
+                    _classifier_result = {
+                        "state": _cls.state,
+                        "confidence": float(_cls.confidence),
+                        "reasons": list(_cls.reasons),
+                    }
+                    _t_action, _t_detail = _trader_decide(
+                        _sym, _snap, _classifier_result, None,
+                        st.positions, max_pos,
+                    )
+                    if _t_action == "BUY" and isinstance(_t_detail, dict):
+                        trader_candidates[_sym] = {
+                            "snap": _snap,
+                            "classifier": _classifier_result,
+                            "detail": _t_detail,
+                        }
+                        log.info("[CYCLE %d] [BRAIN] %s BUY trader-primary | state=%s conf=%.2f size_mult=%.2f",
+                                 cycle, _sym, _cls.state, _cls.confidence,
+                                 float(_t_detail.get("size_mult", 1.0)))
+                    else:
+                        trader_skip_seen[_sym] = str(_t_detail)
+                        log.info("[CYCLE %d] [BRAIN] %s SKIP (state=%s conf=%.2f): %s",
+                                 cycle, _sym, _cls.state, _cls.confidence, _t_detail)
+                except Exception as _bex:
+                    log.warning("[CYCLE %d] [BRAIN] %s pre-pass error — legacy fallback: %s",
+                                cycle, _sym, _bex)
+
+    # ── Build candidate list — trader-primary first, legacy fallback ──
+    # Sort key: trader-primary uses (-conf - 100) so highest-conf trader entries
+    # always sort ahead of any legacy RSI value (RSI range 0-100, so subtracting
+    # 100 guarantees trader keys are negative and rank first).
     candidates = []
     for sym, snap in snapshots.items():
         if sym in st.positions:
@@ -645,13 +877,40 @@ def _run_cycle(st, cycle: int) -> None:
         if sym in _analyzer_blocks:
             log.info("[ANALYZER] %s blocked by outcome analyzer (poor WR)", sym)
             continue
-        signal = compute_signal(snap, open_position=False,
-                                stop_loss_pct=stop_loss,
-                                take_profit_pct=take_profit)
-        if signal.action == "BUY":
-            candidates.append((snap.rsi, sym, snap, signal))
 
-    candidates.sort(key=lambda x: x[0])  # most oversold first
+        # Trader-primary path: trader proposed BUY → synthesize signal, sort by conf
+        if sym in trader_candidates:
+            from types import SimpleNamespace
+            _tc = trader_candidates[sym]
+            _t_cls = _tc["classifier"]
+            _t_detail = _tc["detail"]
+            _trader_signal = SimpleNamespace(
+                action="BUY",
+                reason="trader_primary_buy: " + _t_cls["state"]
+                       + "@" + ("%.2f" % _t_cls["confidence"]),
+                score=0.0,
+                _trader_primary=True,
+                _trader_detail=_t_detail,
+                _trader_classifier=_t_cls,
+            )
+            _sort_key = -float(_t_cls["confidence"]) - 100.0
+            candidates.append((_sort_key, sym, snap, _trader_signal))
+            continue
+
+        # Legacy path: compute_signal (preserved as fallback) — reuse pre-pass cached signal if available
+        signal = _legacy_signals.get(sym) if _legacy_signals.get(sym) is not None \
+                 else compute_signal(snap, open_position=False,
+                                     stop_loss_pct=stop_loss,
+                                     take_profit_pct=take_profit)
+        if signal.action == "BUY":
+            # Trader saw this symbol but said SKIP → suppress legacy BUY
+            if _use_brain and sym in trader_skip_seen:
+                log.info("[CYCLE %d] %s legacy BUY suppressed by trader veto: %s",
+                         cycle, sym, trader_skip_seen[sym])
+                continue
+            candidates.append((float(snap.rsi), sym, snap, signal))
+
+    candidates.sort(key=lambda x: x[0])  # trader-primary (-conf-100) first, then legacy (RSI ASC)
 
     for _, sym, snap, signal in candidates:
         if open_count >= max_pos:
@@ -659,83 +918,48 @@ def _run_cycle(st, cycle: int) -> None:
         if not entry_ok:
             break
         # A7: market_sense composite gate — market hours, lunch chop,
-        # SPY drift, force-flat window. Earnings stub. Most fundamental
-        # market checks; runs first so other gates only fire on entries
-        # that already pass the basic timing tests.
+        # SPY drift, force-flat window. Earnings stub.
         _ms = _market_sense_allow_entry(sym, spy_pct_today=_spy_pct_today)
         if not _ms.allow:
             log.info("[CYCLE %d] %s skipped by market_sense: %s", cycle, sym, _ms.reason)
             continue
-        # Pair-status ladder: skip if autonomy loop / sentinel has this
-        # ticker in COOLDOWN/PROBATION/DISABLED_SOFT (TTL-bounded)
+        # Pair-status ladder
         if sym in pair_status_blocked:
             log.info("[CYCLE %d] %s blocked by pair_status — skipping", cycle, sym)
             continue
-        # A6b: MIN_SCORE_TO_TRADE gate — reject signals below threshold.
-        # Default 50 (permissive). Sentinel B12-port writes 88 to reject
-        # marginal entries during loss streaks.
-        if min_score > 0 and float(getattr(signal, "score", 0.0)) < min_score:
+        # PREMONDAY 2026-05-17: per-symbol re-entry cooldown after non-stop_loss
+        # exit. Stop_loss handled by strike-block ladder below.
+        _last_exit = (st.meta.get("last_exit_ts") or {}).get(sym, 0)
+        if _last_exit and (int(time.time()) - int(_last_exit)) < REENTRY_COOLDOWN_SEC:
+            _wait = REENTRY_COOLDOWN_SEC - (int(time.time()) - int(_last_exit))
+            log.info("[CYCLE %d] %s cooldown_after_exit — %ds remaining", cycle, sym, _wait)
+            continue
+        # MIN_SCORE_TO_TRADE — applies to LEGACY only. Trader-primary entries
+        # have their own per-symbol confidence floor in alpaca_trader.decide_entry.
+        _is_trader_primary = bool(getattr(signal, "_trader_primary", False))
+        if not _is_trader_primary and min_score > 0 \
+                and float(getattr(signal, "score", 0.0)) < min_score:
             log.info("[CYCLE %d] %s skipped: score %.0f < min_score %.0f",
                      cycle, sym, getattr(signal, "score", 0.0), min_score)
             continue
-        # Stop-loss strike block: skip if symbol is blocked this cycle
+        # Stop-loss strike block
         if sym in st.blocked_until and cycle < st.blocked_until[sym]:
             log.info("[CYCLE %d] %s blocked until cycle %d (stop_loss strikes) — skipping",
                      cycle, sym, st.blocked_until[sym])
             continue
         elif sym in st.blocked_until and cycle >= st.blocked_until[sym]:
-            # Block has expired — clean up
             st.blocked_until.pop(sym, None)
             st.stop_loss_strikes.pop(sym, None)
 
-        # Brain decision (alpaca_path_classifier + alpaca_trader).
-        # Runs after safety gates pass. SKIP = veto (continue);
-        # BUY = use detail['size_mult'] as additional sizing multiplier.
-        # Errors fall through to legacy with size_mult=1.0.
-        _brain_size_mult = 1.0
-        _brain_reason = ""
-        if _use_brain:
-            try:
-                from alpaca_data import get_intraday_bars, bars_to_classifier_dicts
-                from alpaca_path_classifier import classify_path
-                from alpaca_trader import decide_entry as _brain_decide
-                _b5  = get_intraday_bars(sym, 5,  60)
-                _b15 = get_intraday_bars(sym, 15, 50)
-                _b1h = get_intraday_bars(sym, 60, 100)
-                _cls = classify_path(
-                    sym,
-                    bars_to_classifier_dicts(_b5),
-                    bars_to_classifier_dicts(_b15),
-                    bars_to_classifier_dicts(_b1h),
-                    prior_state=None,
-                )
-                _classifier_result = {
-                    "state": _cls.state,
-                    "confidence": float(_cls.confidence),
-                    "reasons": list(_cls.reasons),
-                }
-                try:
-                    snap.score = float(getattr(signal, "score", 0.0))
-                except Exception:
-                    pass
-                _action, _detail = _brain_decide(
-                    sym, snap, _classifier_result, None,
-                    st.positions, max_pos,
-                )
-                if _action == "BUY" and isinstance(_detail, dict):
-                    _brain_size_mult = float(_detail.get("size_mult", 1.0))
-                    _brain_reason = str(_detail.get("reason", ""))
-                    log.info("[CYCLE %d] [BRAIN] %s BUY %s | %s",
-                             cycle, sym, _cls.state, _brain_reason)
-                else:
-                    log.info("[CYCLE %d] [BRAIN] %s SKIP (state=%s conf=%.2f): %s",
-                             cycle, sym, _cls.state, _cls.confidence, _detail)
-                    continue
-            except Exception as _bex:
-                log.warning("[CYCLE %d] [BRAIN] %s error — falling back to legacy: %s",
-                            cycle, sym, _bex)
-                _brain_size_mult = 1.0
-                _brain_reason = ""
+        # Sizing — trader-primary uses pre-computed size_mult from decide_entry;
+        # legacy uses 1.0 (trader pre-pass already produced the trader-primary path).
+        if _is_trader_primary:
+            _detail = getattr(signal, "_trader_detail", {}) or {}
+            _brain_size_mult = float(_detail.get("size_mult", 1.0))
+            _brain_reason = str(_detail.get("reason", ""))
+        else:
+            _brain_size_mult = 1.0
+            _brain_reason = ""
 
         MIN_TRADE_USD = 30.0
         trade_usd = max(MIN_TRADE_USD,
@@ -754,6 +978,19 @@ def _run_cycle(st, cycle: int) -> None:
             record_buy(st, sym, fill_price, trade_usd)
             if sym in st.positions:
                 st.positions[sym]._entry_signal = signal.reason
+            # Step 2 (Alpaca→Kraken parity): capture entry meta into st.meta
+            # for downstream auto-tune / exit ledger / sentinel consumption.
+            try:
+                _trader_cls = getattr(signal, "_trader_classifier", None) or {}
+                _cls_state = str(_trader_cls.get("state", "") or "")
+                _cls_conf  = float(_trader_cls.get("confidence", 0.0) or 0.0)
+                st.meta.setdefault("entry_classifier_state", {})[sym] = _cls_state
+                st.meta.setdefault("entry_classifier_conf",  {})[sym] = _cls_conf
+                st.meta.setdefault("entry_rsi",              {})[sym] = float(getattr(snap, "rsi", 0.0) or 0.0)
+                st.meta.setdefault("entry_regime",           {})[sym] = str(st.pair_regime.get(sym, ""))
+                st.meta.setdefault("entry_score",            {})[sym] = float(getattr(signal, "score", 0.0) or 0.0)
+            except Exception:
+                pass
             open_count += 1
             try:
                 import sys as _sys

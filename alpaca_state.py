@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 log = logging.getLogger("alpaca_state")
 
@@ -22,6 +22,102 @@ STATE_FILE       = os.path.join(BASE_DIR, "alpaca_state.json")
 # so sentinel triggers (B2/B4/B6/B12) can consume it with one code path.
 EXIT_LEDGER_FILE = os.path.join(BASE_DIR, "alpaca_exit_counterfactuals.jsonl")
 
+# ── Post-exit forward-price tracking (OBSERVABILITY ONLY — no trading logic) ──
+# Per _opus_plan_alpaca_postexit_tracking.md (operator-approved 2026-06-01).
+# Purpose: log each symbol's price at +N cycles AFTER an exit, keyed by exit_id,
+# to build the winner-killer counterfactual the breakeven_stop / stop_loss-width
+# analysis needs (L-013). Pure-append events; new file; NEVER raises into the
+# trade path. Schema FROZEN v1 (may add fields, may NOT rename/retype).
+POSTEXIT_FILE = os.path.join(BASE_DIR, "alpaca_postexit_tracking.jsonl")
+# Sample offsets expressed in ENGINE CYCLES (alpaca cycle ~ market-hours poll).
+# Engine cycle is ~ a few min; these are deliberately coarse: ~+15m / ~+1h / EOD-ish.
+_POSTEXIT_SAMPLE_CYCLES = (3, 12, 78)   # interpreted relative to exit cycle
+_POSTEXIT_MAX_CYCLES = 80               # hard eviction cap (anti-leak)
+# In-memory tracker: exit_id -> {symbol, exit_price, exit_cycle, exit_reason,
+#                                 peak_pct, done_offsets:set}
+_POSTEXIT_TRACKER: Dict[str, dict] = {}
+
+
+def _postexit_append(record: dict) -> None:
+    """Pure-append one event to POSTEXIT_FILE. Never raises."""
+    try:
+        with open(POSTEXIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+    except Exception as exc:
+        log.warning("postexit append failed: %s", exc)
+
+
+def register_postexit(exit_id: str, symbol: str, exit_price: float,
+                      exit_cycle: int, exit_reason: str, peak_pct: float) -> None:
+    """Register an exit for forward-price tracking (called from record_sell).
+    Writes an 'exit_open' event and adds to the in-memory tracker. Never raises."""
+    try:
+        _POSTEXIT_TRACKER[exit_id] = {
+            "symbol": symbol,
+            "exit_price": float(exit_price),
+            "exit_cycle": int(exit_cycle),
+            "exit_reason": exit_reason,
+            "peak_pct": float(peak_pct),
+            "done_offsets": set(),
+        }
+        _postexit_append({
+            "schema_version": 1,
+            "event": "exit_open",
+            "exit_id": exit_id,
+            "symbol": symbol,
+            "exit_price": float(exit_price),
+            "exit_cycle": int(exit_cycle),
+            "exit_reason": exit_reason,
+            "peak_pct_at_exit": float(peak_pct),
+            "ts": time.time(),
+            "ts_iso": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as exc:
+        log.warning("register_postexit failed: %s", exc)
+
+
+def sample_postexit(cycle: int, price_lookup) -> None:
+    """Called once per engine cycle AFTER snapshots are fetched. For each tracked
+    exit whose sample offset is due, append a 'sample' event using the in-hand
+    price (price_lookup(symbol) -> float|None). Evicts finished/expired exits.
+    Pure observability; NEVER raises into the trade path."""
+    try:
+        for exit_id in list(_POSTEXIT_TRACKER.keys()):
+            t = _POSTEXIT_TRACKER[exit_id]
+            elapsed = cycle - t["exit_cycle"]
+            for off in _POSTEXIT_SAMPLE_CYCLES:
+                if off in t["done_offsets"]:
+                    continue
+                if elapsed >= off:
+                    px = None
+                    try:
+                        px = price_lookup(t["symbol"])
+                    except Exception:
+                        px = None
+                    pct = (((px - t["exit_price"]) / t["exit_price"] * 100.0)
+                           if (px and t["exit_price"]) else None)
+                    _postexit_append({
+                        "schema_version": 1,
+                        "event": "sample",
+                        "exit_id": exit_id,
+                        "symbol": t["symbol"],
+                        "offset_cycles": off,
+                        "elapsed_cycles": elapsed,
+                        "exit_price": t["exit_price"],
+                        "price": (float(px) if px else None),
+                        "pct_vs_exit": (round(pct, 4) if pct is not None else None),
+                        "exit_reason": t["exit_reason"],
+                        "peak_pct_at_exit": t["peak_pct"],
+                        "ts": time.time(),
+                        "ts_iso": datetime.now(timezone.utc).isoformat(),
+                    })
+                    t["done_offsets"].add(off)
+            # Eviction: all offsets done, or past the hard cap.
+            if len(t["done_offsets"]) >= len(_POSTEXIT_SAMPLE_CYCLES) or elapsed >= _POSTEXIT_MAX_CYCLES:
+                _POSTEXIT_TRACKER.pop(exit_id, None)
+    except Exception as exc:
+        log.warning("sample_postexit failed: %s", exc)
+
 
 @dataclass
 class BotPosition:
@@ -29,6 +125,17 @@ class BotPosition:
     entry_price: float
     entry_ts: int
     usd_invested: float
+    # PREMONDAY 2026-05-17: persisted entry_signal so it survives save/load
+    # cycles. Pre-fix: runtime-monkey-patched, destroyed by asdict serializer,
+    # caused 17 trades to log as "unknown" cohort (F-5 audit).
+    _entry_signal: str = "unknown"
+    # F-1 v3 (2026-05-20): actual peak P&L observed since entry. Engine
+    # updates each cycle in the SELL loop. Replaces bars[-20:]-derived peak
+    # in alpaca_strategy.py that included daily-bar highs from BEFORE entry
+    # and fired false trail_stop on fresh intraday entries (TSLA/AMZN
+    # 2026-05-20 09:35-09:36 evidence). Ratchets up monotonically from
+    # 0.0 default; never decreases.
+    peak_pnl_pct: float = 0.0
 
 
 @dataclass
@@ -53,6 +160,10 @@ class BotState:
     equity_usd: float = 0.0
     unrealized_pnl_usd: float = 0.0
     dd_pct: float = 0.0
+    # Per-symbol entry metadata captured on BUY (Step 2 — Alpaca→Kraken parity).
+    # Holds dicts keyed by symbol: entry_classifier_state, entry_classifier_conf,
+    # entry_rsi, entry_regime, entry_score. Cleaned up on close in record_sell.
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 def load_state() -> BotState:
@@ -75,6 +186,7 @@ def load_state() -> BotState:
             equity_usd=float(raw.get("equity_usd", 0.0) or 0.0),
             unrealized_pnl_usd=float(raw.get("unrealized_pnl_usd", 0.0) or 0.0),
             dd_pct=float(raw.get("dd_pct", 0.0) or 0.0),
+            meta=dict(raw.get("meta") or {}),
         )
         for sym, p in (raw.get("positions") or {}).items():
             st.positions[sym] = BotPosition(**p)
@@ -103,6 +215,7 @@ def save_state(st: BotState) -> None:
         "breakeven_armed":    sorted(st.breakeven_armed),
         "sup_mode_since":     getattr(st, "sup_mode_since", None),
         "pair_regime":        dict(st.pair_regime),
+        "meta":               dict(getattr(st, "meta", {}) or {}),
         # ── Legacy aliases (kept so existing readers don't break) ─────
         "peak_equity":        st.peak_equity,
     }
@@ -110,7 +223,18 @@ def save_state(st: BotState) -> None:
         _tmp = STATE_FILE + ".tmp"
         with open(_tmp, "w", encoding="utf-8") as f:
             json.dump(raw, f, indent=2)
-        os.replace(_tmp, STATE_FILE)
+        # OSREPLACE 2026-05-09: 3-attempt retry on PermissionError to survive
+        # Windows transient file-lock collisions. Mirrors enzobot/state_store.py
+        # 2026-05-07 fix. Outer except preserved (silent-swallow for non-Permission
+        # errors stays unchanged — separate ride-along).
+        for _attempt in range(3):
+            try:
+                os.replace(_tmp, STATE_FILE)
+                break
+            except PermissionError:
+                if _attempt == 2:
+                    raise
+                time.sleep(0.1)
     except Exception as exc:
         log.error("Failed to save state: %s", exc)
 
@@ -128,11 +252,16 @@ def _write_exit_ledger_row(
     regime_at_entry: Optional[str],
     regime_at_exit: Optional[str],
     score_at_entry: Optional[float],
+    entry_classifier_state: Optional[str] = None,
+    entry_classifier_conf: Optional[float] = None,
+    entry_rsi: Optional[float] = None,
 ) -> None:
     """Append one row to alpaca_exit_counterfactuals.jsonl.
 
     Schema matches enzobot's exit_counterfactuals.jsonl so sentinel triggers
-    (B2/B4/B6/B12) can read both files with the same parser.
+    (B2/B4/B6/B12) can read both files with the same parser. Brain context
+    fields (entry_classifier_state/conf, entry_rsi) added by Alpaca→Kraken
+    parity Step 2 — required for auto-tune bucket statistics.
     """
     now = time.time()
     # Derived qty fallback: usd_invested / entry_price
@@ -154,6 +283,9 @@ def _write_exit_ledger_row(
         "regime_at_entry":  regime_at_entry,
         "regime_at_exit":   regime_at_exit,
         "score_at_entry":   score_at_entry,
+        "entry_classifier_state": entry_classifier_state,
+        "entry_classifier_conf":  entry_classifier_conf,
+        "entry_rsi":              entry_rsi,
         "sleeve":           "alpaca",
     }
     try:
@@ -211,6 +343,14 @@ def record_sell(
                 # Reset strike counter so it can accumulate again after the block
                 st.stop_loss_strikes[symbol] = 0
 
+    # Snapshot brain context from st.meta BEFORE we clean it up below.
+    _meta = getattr(st, "meta", {}) or {}
+    _entry_state = (_meta.get("entry_classifier_state") or {}).get(symbol)
+    _entry_conf  = (_meta.get("entry_classifier_conf") or {}).get(symbol)
+    _entry_rsi   = (_meta.get("entry_rsi") or {}).get(symbol)
+    _entry_regime = (_meta.get("entry_regime") or {}).get(symbol)
+    _entry_score_meta = (_meta.get("entry_score") or {}).get(symbol)
+
     # Unified exit ledger (parity with enzobot for sentinel consumption)
     try:
         _hold = int(time.time()) - pos.entry_ts if pos.entry_ts else 0
@@ -224,12 +364,40 @@ def record_sell(
             pnl_usd=pnl,
             exit_reason=reason,
             hold_sec=_hold,
-            regime_at_entry=None,  # not currently tracked at buy time
+            regime_at_entry=_entry_regime,
             regime_at_exit=_regime_exit,
-            score_at_entry=score_at_entry,
+            score_at_entry=(score_at_entry if score_at_entry is not None else _entry_score_meta),
+            entry_classifier_state=_entry_state,
+            entry_classifier_conf=_entry_conf,
+            entry_rsi=_entry_rsi,
         )
     except Exception as _exc:
         log.warning("[EXIT_LEDGER] write failed for %s: %s", symbol, _exc)
+
+    # Post-exit forward-price tracking registration (OBSERVABILITY ONLY).
+    # Keyed by the same exit_id format the ledger uses. Never raises.
+    try:
+        _peak = float(getattr(pos, "peak_pnl_pct", 0.0) or 0.0)
+        register_postexit(
+            exit_id=f"{symbol}_{int(time.time())}",
+            symbol=symbol,
+            exit_price=exit_price,
+            exit_cycle=int(getattr(st, "cycle", 0) or 0),
+            exit_reason=reason,
+            peak_pct=_peak,
+        )
+    except Exception as _exc:
+        log.warning("[POSTEXIT] register failed for %s: %s", symbol, _exc)
+
+    # Clean up entry meta for closed symbol so meta dict doesn't grow unbounded
+    try:
+        for _k in ("entry_classifier_state", "entry_classifier_conf",
+                   "entry_rsi", "entry_regime", "entry_score"):
+            _d = _meta.get(_k)
+            if isinstance(_d, dict):
+                _d.pop(symbol, None)
+    except Exception:
+        pass
 
     save_state(st)
     return pnl

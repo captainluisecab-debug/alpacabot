@@ -67,13 +67,27 @@ def buy_notional(symbol: str, usd_amount: float) -> Optional[dict]:
 
 
 def sell_all(symbol: str) -> Optional[dict]:
-    """Close the entire position in symbol."""
+    """Close the entire position in symbol.
+
+    Returns:
+      dict with id/symbol/side on success.
+      dict with {"error": "pdt_block", "symbol": ...} on Alpaca PDT block (40310100).
+      None on any other failure.
+    """
     log.info("[%s] SELL ALL %s", TRADE_MODE, symbol)
     try:
         resp = _trading_client().close_position(symbol)
         log.info("[%s] Position closed: %s -> id=%s", TRADE_MODE, symbol, resp.id)
         return {"id": str(resp.id), "symbol": symbol, "side": "SELL"}
     except Exception as exc:
+        # PDT detection — Alpaca returns 40310100 / "pattern day trading" for
+        # sub-$25k accounts that exceed 3 day-trades in 5-day window. Surface
+        # as tagged dict so engine can mark the symbol blocked-for-today
+        # instead of retrying every cycle.
+        _msg = str(exc).lower()
+        if "40310100" in _msg or "pattern day trading" in _msg:
+            log.warning("sell_all(%s) PDT-BLOCKED: %s", symbol, exc)
+            return {"error": "pdt_block", "symbol": symbol}
         log.error("sell_all(%s) failed: %s", symbol, exc)
         return None
 

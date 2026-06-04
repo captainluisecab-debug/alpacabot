@@ -1,0 +1,29 @@
+{
+  "TSLA": {
+    "status": "COOLDOWN",
+    "size_multiplier": 0.0,
+    "ttl_ts": "2026-05-18T16:56:18.284314+00:00",
+    "reason": "B12-alpaca: 4-loss streak, last losing ticker",
+    "trigger": "B12_alpaca_loss_streak_universe",
+    "set_at": "2026-05-18T12:56:18.284320+00:00"
+  },
+  "NVDA": {
+    "status": "COOLDOWN",
+    "size_multiplier": 0.0,
+    "ttl_ts": "2026-05-18T23:02:21.471704+00:00",
+    "reason": "B12-alpaca: 5-loss streak, last losing ticker",
+    "trigger": "B12_alpaca_loss_streak_universe",
+    "set_at": "2026-05-18T19:02:21.471710+00:00"
+  },
+  "QQQ": {
+    "status": "COOLDOWN",
+    "size_multiplier": 0.0,
+    "ttl_ts": "2026-05-19T18:31:11.375300+00:00",
+    "reason": "B12-alpaca: 7-loss streak, last losing ticker",
+    "trigger": "B12_alpaca_loss_streak_universe",
+    "set_at": "2026-05-19T14:31:11.375306+00:00"
+  },
+  "_meta": {
+    "last_update": "2026-05-19T14:31:11.375308+00:00"
+  }
+}

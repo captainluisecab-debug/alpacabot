@@ -1,8 +1,22 @@
 .env
 *.env
+.env.*
 state.json
 alpaca_state.json
 logs/
 *.log
 __pycache__/
 *.pyc
+
+# Backups — code .bak clutter + CREDENTIAL-bearing .env.bak (NEVER push live keys)
+*.bak
+*.bak.*
+.env.bak.*
+
+# Machine-local runtime artifacts / flags / data exports
+RESTART_REQUESTED.flag
+_backups/
+*.xlsx
+alpaca_postexit_tracking.jsonl
+alpaca_exit_counterfactuals.jsonl
+alpaca_trade_log.jsonl

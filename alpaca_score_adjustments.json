@@ -1,0 +1,138 @@
+{
+  "ts": "2026-06-03T15:58:46",
+  "lookback_days": 14,
+  "total_trades": 22,
+  "total_pnl": 13.37,
+  "overall_win_rate": 72.7,
+  "per_symbol_quality": {
+    "AMZN": {
+      "count": 3,
+      "avg_pnl": -0.15,
+      "win_rate": 66.7,
+      "total_pnl": -0.45,
+      "score_adjustment": 0.0
+    },
+    "TSLA": {
+      "count": 4,
+      "avg_pnl": -0.07,
+      "win_rate": 50.0,
+      "total_pnl": -0.3,
+      "score_adjustment": 0.0
+    },
+    "NVDA": {
+      "count": 1,
+      "avg_pnl": -2.55,
+      "win_rate": 0.0,
+      "total_pnl": -2.55,
+      "score_adjustment": 0.0
+    },
+    "SPY": {
+      "count": 5,
+      "avg_pnl": 0.32,
+      "win_rate": 100.0,
+      "total_pnl": 1.61,
+      "score_adjustment": 0.16
+    },
+    "QQQ": {
+      "count": 1,
+      "avg_pnl": 0.43,
+      "win_rate": 100.0,
+      "total_pnl": 0.43,
+      "score_adjustment": 0.0
+    },
+    "MSFT": {
+      "count": 4,
+      "avg_pnl": 2.55,
+      "win_rate": 75.0,
+      "total_pnl": 10.22,
+      "score_adjustment": 1.28
+    },
+    "AMD": {
+      "count": 4,
+      "avg_pnl": 1.1,
+      "win_rate": 75.0,
+      "total_pnl": 4.41,
+      "score_adjustment": 0.55
+    }
+  },
+  "entry_signal_quality": {
+    "trader_primary_buy: breakout_long@0.55": {
+      "count": 6,
+      "avg_pnl": 2.41,
+      "win_rate": 100.0
+    },
+    "trader_primary_buy: bullish_continuation@0.62": {
+      "count": 16,
+      "avg_pnl": -0.07,
+      "win_rate": 62.5
+    }
+  },
+  "exit_reason_quality": {
+    "trail_stop_mid (peak +2.0%, floor +1.0%, now 0.8%)": {
+      "count": 1,
+      "avg_pnl": 0.49,
+      "win_rate": 100.0
+    },
+    "trail_stop_hi (peak +4.0%, floor +2.4%, now 2.1%)": {
+      "count": 1,
+      "avg_pnl": 1.32,
+      "win_rate": 100.0
+    },
+    "stop_loss -2.5%": {
+      "count": 1,
+      "avg_pnl": -2.55,
+      "win_rate": 0.0
+    },
+    "eod_posture_flatten": {
+      "count": 10,
+      "avg_pnl": 0.09,
+      "win_rate": 80.0
+    },
+    "quick_profit_hitrun pnl=0.89% hold=503s": {
+      "count": 1,
+      "avg_pnl": 0.9,
+      "win_rate": 100.0
+    },
+    "trail_stop_hi (peak +9.3%, floor +5.6%, now 5.4%)": {
+      "count": 1,
+      "avg_pnl": 3.29,
+      "win_rate": 100.0
+    },
+    "trail_stop_mid (peak +2.3%, floor +1.2%, now 1.1%)": {
+      "count": 1,
+      "avg_pnl": 0.67,
+      "win_rate": 100.0
+    },
+    "trail_stop_mid (peak +2.5%, floor +1.3%, now 1.3%)": {
+      "count": 1,
+      "avg_pnl": 0.81,
+      "win_rate": 100.0
+    },
+    "trail_stop_hi (peak +5.9%, floor +3.5%, now 3.4%)": {
+      "count": 1,
+      "avg_pnl": 2.06,
+      "win_rate": 100.0
+    },
+    "stop_loss -3.1%": {
+      "count": 1,
+      "avg_pnl": -1.99,
+      "win_rate": 0.0
+    },
+    "take_profit 10.6%": {
+      "count": 1,
+      "avg_pnl": 10.8,
+      "win_rate": 100.0
+    },
+    "stop_loss -2.7%": {
+      "count": 1,
+      "avg_pnl": -1.75,
+      "win_rate": 0.0
+    },
+    "stop_loss -2.6%": {
+      "count": 1,
+      "avg_pnl": -1.6,
+      "win_rate": 0.0
+    }
+  },
+  "recommended_blocks": []
+}

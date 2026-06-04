@@ -50,6 +50,10 @@ def compute_signal(
     # A6b wires (forward-compat defaults — no behavior change unless overrides write tighter):
     time_stop_sec: int = 0,    # >0 → forced exit after this hold time
     min_hold_sec: int = 0,     # >0 → block non-stop exits until this hold time
+    # F-1 v3 (2026-05-20): actual peak pnl% observed since entry. Engine
+    # passes pos.peak_pnl_pct (tracked per cycle). Default 0.0 means
+    # trail will not arm — safe for callers that don't pass it.
+    peak_pnl_pct_actual: float = 0.0,
 ) -> Signal:
     price = snap.price
     rsi   = snap.rsi
@@ -70,8 +74,12 @@ def compute_signal(
     # ── Exit logic (position open) ──────────────────────────────────
     if open_position and entry_price > 0:
         pnl_pct = (price - entry_price) / entry_price * 100
-        high_since_entry = max((b.high for b in (bars or [])[-20:]), default=price)
-        peak_pnl_pct = (high_since_entry - entry_price) / entry_price * 100
+        # F-1 v3 (2026-05-20): peak is caller-provided (engine tracks each
+        # cycle in SELL loop). PRE-FIX BUG: bars[-20:] high included daily-bar
+        # peaks from BEFORE entry, fired false trail_stop on fresh intraday
+        # entries (TSLA/AMZN 2026-05-20 09:35-09:36 evidence). Floor at
+        # pnl_pct so peak >= now even on first cycle.
+        peak_pnl_pct = max(peak_pnl_pct_actual, pnl_pct)
 
         # PRIORITY 1 — Stop loss ALWAYS fires (capital protection, ignores MIN_HOLD)
         if pnl_pct <= -stop_loss_pct:
@@ -94,10 +102,25 @@ def compute_signal(
         if hold_sec > 0 and hold_sec <= QUICK_PROFIT_MAX_HOLD_SEC and pnl_pct >= QUICK_PROFIT_PCT * 100:
             return sig("SELL", f"quick_profit_hitrun pnl={pnl_pct:.2f}% hold={hold_sec}s")
 
-        # Breakeven stop: if position reached +1% at any point, don't let it
-        # become a loss. Exit at breakeven if price returns to entry.
-        if peak_pnl_pct >= 1.0 and pnl_pct <= 0.0:
-            return sig("SELL", f"breakeven_stop (peak was +{peak_pnl_pct:.1f}%, now {pnl_pct:.1f}%)")
+        # F-1 v2 (2026-05-18): trail-from-peak replaces fixed-floor breakeven.
+        # PREMONDAY F-1 fix (1.5/0.1 fixed-floor) did NOT prevent NVDA peak
+        # +7.0%-to-0% give-back on 2026-05-18. Structural: any fixed-floor rule
+        # surrenders ALL peak gain above the floor. Tiered trail-from-peak locks
+        # in a fraction of peak proportional to peak size. Historical backtest
+        # on 17-trade cohort: original -$2.51 -> v2 +$16.11 (+$18.62 delta).
+        TRAIL_HIGH_ARM_PCT  = 3.0   # high-peak arm
+        TRAIL_HIGH_GIVEBACK = 0.40  # high-peak gives back 40% of peak (lock 60%)
+        TRAIL_MID_ARM_PCT   = 1.5   # mid-peak arm (preserves PREMONDAY threshold)
+        TRAIL_MID_GIVEBACK  = 0.50  # mid-peak gives back 50% of peak (lock half)
+
+        if peak_pnl_pct >= TRAIL_HIGH_ARM_PCT:
+            trail_floor = peak_pnl_pct * (1 - TRAIL_HIGH_GIVEBACK)
+            if pnl_pct < trail_floor:
+                return sig("SELL", f"trail_stop_hi (peak +{peak_pnl_pct:.1f}%, floor +{trail_floor:.1f}%, now {pnl_pct:.1f}%)")
+        elif peak_pnl_pct >= TRAIL_MID_ARM_PCT:
+            trail_floor = peak_pnl_pct * (1 - TRAIL_MID_GIVEBACK)
+            if pnl_pct < trail_floor:
+                return sig("SELL", f"trail_stop_mid (peak +{peak_pnl_pct:.1f}%, floor +{trail_floor:.1f}%, now {pnl_pct:.1f}%)")
 
         if pnl_pct >= take_profit_pct:
             return sig("SELL", f"take_profit {pnl_pct:.1f}%")
