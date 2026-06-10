@@ -70,6 +70,64 @@ PAIR_STATUS_FILE       = os.path.join(_BASE, "alpaca_pair_status.json")
 SENTINEL_OVERRIDE_FILE = os.path.join(_BASE, "alpaca_sentinel_override.json")
 
 
+# ── ACCOUNT-BLOCKED halt (D-034) ────────────────────────────────────────────
+# When Alpaca rejects all orders (40310000 / trading_blocked), HALT order
+# attempts instead of spamming 1,529 rejections. Deadlock-proof: a time-cooldown
+# auto-clears so the bot probes again (~2x/hr) and resumes the instant Alpaca is
+# tradable — no latch, no operator re-arm (mirrors zerobot D-031).
+_ACCOUNT_BLOCK_COOLDOWN_SEC = 1800  # 30 min
+
+
+def _acct_flags_blocked(account) -> bool:
+    return bool(getattr(account, "trading_blocked", False)
+                or getattr(account, "account_blocked", False)
+                or getattr(account, "trade_suspended_by_user", False))
+
+
+def _escalate_account_blocked(account, cycle) -> None:
+    try:
+        from escalation_client import write_escalation
+        write_escalation("alpacabot", {
+            "problem_code": "ACCOUNT_BLOCKED", "urgency": "HIGH",
+            "context": {"cycle": cycle,
+                        "trading_blocked": getattr(account, "trading_blocked", None),
+                        "account_blocked": getattr(account, "account_blocked", None),
+                        "trade_suspended_by_user": getattr(account, "trade_suspended_by_user", None)},
+            "question": ("Alpaca account is rejecting ALL orders (40310000 / trading_blocked). "
+                         "alpacabot HALTED order attempts (auto-probes ~every 30m, auto-resumes "
+                         "when tradable). Operator: fix API-key trade permission / account "
+                         "trade-suspend flag at Alpaca."),
+        })
+    except Exception as e:  # noqa: BLE001
+        log.error("[HALT] account-blocked escalation failed: %s", e)
+
+
+def _mark_account_blocked(st, account, cycle) -> None:
+    """Set/refresh the halt flag + cooldown; escalate ONCE per block episode."""
+    now = time.time()
+    was = bool(st.meta.get("account_blocked")) and now < float(st.meta.get("account_blocked_until", 0) or 0)
+    st.meta["account_blocked"] = True
+    st.meta["account_blocked_until"] = now + _ACCOUNT_BLOCK_COOLDOWN_SEC
+    if not was:
+        log.error("[HALT] ACCOUNT_BLOCKED — suppressing orders ~%dm (cycle %d)",
+                  _ACCOUNT_BLOCK_COOLDOWN_SEC // 60, cycle)
+        _escalate_account_blocked(account, cycle)
+
+
+def _no_recent_real_fills(st, max_age_days: int = 2) -> bool:
+    """True if the bot HAS traded before but had no real fill (sell) in N days —
+    the frozen-data condition that must NOT drive auto-tune (D-034)."""
+    last = 0
+    for v in (st.meta.get("last_exit_ts") or {}).values():
+        try:
+            last = max(last, int(v or 0))
+        except (TypeError, ValueError):
+            continue
+    if last == 0:
+        return False  # never sold — don't over-gate a fresh bot
+    return (time.time() - last) > max_age_days * 86400
+
+
 def _read_pair_status_blocks() -> set:
     """Read alpaca_pair_status.json. Return set of ticker symbols that are
     blocked (status in COOLDOWN/PROBATION/DISABLED_SOFT with valid TTL).
@@ -330,6 +388,11 @@ def _run_cycle(st, cycle: int) -> None:
             snap = snapshots.get(sym) if snapshots else None
             pos_before = st.positions.get(sym)
             fill = sell_all(sym)
+            if isinstance(fill, dict) and fill.get("error") == "account_blocked":
+                _mark_account_blocked(st, None, cycle)  # account not yet fetched here
+                log.error("[CYCLE %d] [HALT] %s force-flatten denied — ACCOUNT_BLOCKED; halting cycle", cycle, sym)
+                save_state(st)
+                return
             # PDT-aware guard: tagged dict from broker means PDT block. Skip
             # phantom record_sell. Governor force-flatten gets loud error log.
             if isinstance(fill, dict) and fill.get("error") == "pdt_block":
@@ -396,6 +459,25 @@ def _run_cycle(st, cycle: int) -> None:
     st.unrealized_pnl_usd = float(unrealized)
     st.dd_pct = float(dd_pct)
 
+    # ── ACCOUNT-BLOCKED halt (D-034) ────────────────────────────────
+    # Proactive: if the account object reports blocked, flag it. Then compute the
+    # effective halt (flag set AND within cooldown). If blocked, suppress ALL order
+    # logic this cycle (single gate). Auto-resume: when cooldown elapses (and the
+    # account no longer reports blocked) the flag clears and we probe again.
+    _now_blk = time.time()
+    if _acct_flags_blocked(account):
+        _mark_account_blocked(st, account, cycle)
+    _account_blocked = (bool(st.meta.get("account_blocked"))
+                        and _now_blk < float(st.meta.get("account_blocked_until", 0) or 0))
+    if st.meta.get("account_blocked") and not _account_blocked:
+        st.meta["account_blocked"] = False
+        log.warning("[RESUME] account-block cooldown elapsed — probing orders again (cycle %d)", cycle)
+    if _account_blocked:
+        log.error("[CYCLE %d] [HALT] ACCOUNT_BLOCKED — all order attempts suppressed "
+                  "(equity=$%.2f); auto-probe after cooldown", cycle, equity)
+        save_state(st)
+        return
+
     # ── Market hours check (AFTER canonical state update) ──────────
     if not _is_market_open():
         log.info("[CYCLE %d] Market closed — waiting (equity=$%.2f dd=%.2f%%)",
@@ -436,35 +518,29 @@ def _run_cycle(st, cycle: int) -> None:
         entry_size_from_dd = _pct_per_slot
     trade_size_override = entry_size_from_dd
 
-    # ── Fetch live positions from Alpaca ────────────────────────────
+    # ── Authoritative reconcile vs Alpaca (D-034) ───────────────────
+    # get_positions() returns None on API ERROR, {} only when genuinely flat.
     live_positions = get_positions()
 
-    # Sync: remove local positions that Alpaca no longer shows
-    for sym in list(st.positions.keys()):
-        if sym not in live_positions:
-            log.warning("[SYNC] %s not in Alpaca positions — removing from local state", sym)
-            st.positions.pop(sym)
-
-    # Sync: add Alpaca positions missing from local state (orphan recovery)
-    if live_positions:
-        from alpaca_state import BotPosition as Position
-        for sym, lp in live_positions.items():
-            if sym not in st.positions:
-                _entry = float(lp.avg_entry_price)
-                _qty = float(lp.qty)
-                _cost = _entry * _qty
-                st.positions[sym] = Position(
-                    symbol=sym, entry_price=_entry,
-                    entry_ts=int(time.time()), usd_invested=round(_cost, 2),
-                    _entry_signal="orphan_recovery",
-                )
-                log.warning("[SYNC] %s on Alpaca but not local — added (entry=$%.2f qty=%.4f)",
-                            sym, _entry, _qty)
+    if live_positions is None:
+        # API error — do NOT touch local state (empty != error). This is the fix
+        # for the phantom-position thrash (nuke-then-readd loop).
+        log.warning("[SYNC] get_positions() API error — skipping reconcile (state preserved)")
+    else:
+        # SAFE per-cycle reconcile (D-034 root-cause fix, 2026-06-09): drop locals the
+        # exchange no longer shows (flag if suspiciously young), AND adopt exchange
+        # positions not local using Alpaca's REAL avg_entry_price. Adoption NEVER
+        # fabricates a price (the fabrication was the cause of the old D-034 thrash);
+        # if avg_entry_price is ever missing it flags for manual review, never guesses.
+        # The get_positions()->None API-error guard above is preserved (we only get
+        # here with a genuine live_positions dict). See alpaca_reconcile.py.
+        from alpaca_reconcile import reconcile_positions
+        reconcile_positions(st, live_positions, cycle, log)
 
     # ── Log open positions with live P&L ────────────────────────────
     if st.positions:
         for sym, pos in st.positions.items():
-            live = live_positions.get(sym)
+            live = (live_positions or {}).get(sym)  # live_positions may be None on API error
             if live:
                 live_price  = float(getattr(live, "current_price", pos.entry_price) or pos.entry_price)
                 pos_pnl_pct = (live_price - pos.entry_price) / pos.entry_price * 100
@@ -526,6 +602,12 @@ def _run_cycle(st, cycle: int) -> None:
             if snap and snap.price > 0:
                 log.warning("[CYCLE %d] AFTER-HOURS SELL ARMED: %s — executing at market open", cycle, _armed_sym)
                 fill = sell_all(_armed_sym)
+                if isinstance(fill, dict) and fill.get("error") == "account_blocked":
+                    _mark_account_blocked(st, account, cycle)
+                    log.error("[CYCLE %d] [HALT] %s after-hours sell denied — ACCOUNT_BLOCKED; halting cycle",
+                              cycle, _armed_sym)
+                    save_state(st)
+                    return
                 # PDT-aware guard: tagged dict from broker means PDT block.
                 # Skip phantom record_sell. After-hours risk exit denied loudly.
                 if isinstance(fill, dict) and fill.get("error") == "pdt_block":
@@ -688,6 +770,11 @@ def _run_cycle(st, cycle: int) -> None:
                 continue
             log.info("[CYCLE %d] SELL %s @ $%.2f | reason=%s", cycle, sym, snap.price, signal.reason)
             fill = sell_all(sym)
+            if isinstance(fill, dict) and fill.get("error") == "account_blocked":
+                _mark_account_blocked(st, account, cycle)
+                log.error("[CYCLE %d] [HALT] %s sell denied — ACCOUNT_BLOCKED; halting cycle", cycle, sym)
+                save_state(st)
+                return
             # PDT detection on the response — broker returns
             # {"error": "pdt_block", ...} for 40310100. Mark the symbol so
             # subsequent cycles skip the broker call (gate above). For
@@ -973,6 +1060,11 @@ def _run_cycle(st, cycle: int) -> None:
         log.info("[CYCLE %d] BUY %s @ $%.2f | rsi=%.1f reason=%s (size=$%.0f sup=%s)",
                  cycle, sym, snap.price, snap.rsi, _full_reason, trade_usd, sup_mode)
         fill = buy_notional(sym, trade_usd)
+        if isinstance(fill, dict) and fill.get("error") == "account_blocked":
+            _mark_account_blocked(st, account, cycle)
+            log.error("[CYCLE %d] [HALT] %s buy denied — ACCOUNT_BLOCKED; halting cycle", cycle, sym)
+            save_state(st)
+            return
         if fill:
             fill_price = float(fill.get("filled_avg_price") or snap.price)
             record_buy(st, sym, fill_price, trade_usd)
@@ -1017,10 +1109,15 @@ def _run_cycle(st, cycle: int) -> None:
         # Expose live equity/peak on state so brain can read them (legacy)
         st.equity = equity
         # Local-first: skip brain API call when entries are blocked (zero value)
-        if entry_ok:
+        # D-034: also gate when account is blocked OR there have been no REAL fills
+        # in 2 days — never auto-tune (e.g. increase size) on frozen/fake data.
+        _brain_blocked = bool(st.meta.get("account_blocked"))
+        _brain_stale = _no_recent_real_fills(st, max_age_days=2)
+        if entry_ok and not _brain_blocked and not _brain_stale:
             brain_run(st, cycle, positions_str)
         elif cycle % 100 == 0:
-            log.info("[BRAIN] Skipped — entry_allowed=false, brain adjustments have no effect")
+            log.info("[BRAIN] Skipped — entry_ok=%s account_blocked=%s stale_data=%s "
+                     "(no param changes)", entry_ok, _brain_blocked, _brain_stale)
 
     save_state(st)
 
