@@ -617,6 +617,8 @@ def _run_cycle(st, cycle: int) -> None:
                     continue
                 if fill:
                     fill_price = float(fill.get("filled_avg_price") or snap.price)
+                    _ah_pos = st.positions.get(_armed_sym)  # D-045: capture score BEFORE record_sell pops the position
+                    _ah_score = float(getattr(_ah_pos, 'entry_score', -1.0)) if _ah_pos else -1.0
                     pnl = record_sell(st, _armed_sym, fill_price, reason="after_hours_risk")
                     log.info("[CYCLE %d] %s after-hours risk sell | pnl=$%.2f", cycle, _armed_sym, pnl)
                     try:
@@ -624,7 +626,7 @@ def _run_cycle(st, cycle: int) -> None:
                         _log_outcome(symbol=_armed_sym, side="SELL", entry_signal="inherited",
                                      exit_reason="after_hours_risk", pnl_usd=pnl,
                                      entry_price=st.positions.get(_armed_sym, pos).entry_price if _armed_sym in st.positions else 0,
-                                     exit_price=fill_price, hold_sec=0)
+                                     exit_price=fill_price, hold_sec=0, entry_score=_ah_score)
                     except Exception:
                         pass
     _after_hours_sell_armed.clear()
@@ -813,6 +815,7 @@ def _run_cycle(st, cycle: int) -> None:
                         exit_reason=signal.reason, pnl_usd=pnl,
                         entry_price=pos.entry_price, exit_price=fill_price,
                         hold_sec=_hold, rsi_at_exit=snap.rsi if snap else 0,
+                        entry_score=getattr(pos, 'entry_score', -1.0),  # D-045
                     )
                 except Exception:
                     log.warning("[OUTCOME] trade log failed sym=%s", sym, exc_info=True)
@@ -1070,6 +1073,7 @@ def _run_cycle(st, cycle: int) -> None:
             record_buy(st, sym, fill_price, trade_usd)
             if sym in st.positions:
                 st.positions[sym]._entry_signal = signal.reason
+                st.positions[sym].entry_score = float(getattr(signal, "score", 0.0) or 0.0)  # D-045: carry score for trade-log attribution
             # Step 2 (Alpaca→Kraken parity): capture entry meta into st.meta
             # for downstream auto-tune / exit ledger / sentinel consumption.
             try:

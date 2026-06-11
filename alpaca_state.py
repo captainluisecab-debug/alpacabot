@@ -136,6 +136,11 @@ class BotPosition:
     # 2026-05-20 09:35-09:36 evidence). Ratchets up monotonically from
     # 0.0 default; never decreases.
     peak_pnl_pct: float = 0.0
+    # D-045 (2026-06-10): entry-quality score (signal.score vs MIN_SCORE_TO_TRADE,
+    # ~50-95) captured at BUY so the closed-trade log can be banded by signal
+    # strength (WR-by-signal-band forward test). Sentinel -1.0 = unknown
+    # (adopted orphans, pre-ship rows). Additive; round-trips via asdict / **p.
+    entry_score: float = -1.0
 
 
 @dataclass

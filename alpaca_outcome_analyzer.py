@@ -26,7 +26,8 @@ MIN_TRADES_PER_SYMBOL = 2
 
 def log_trade(symbol: str, side: str, entry_signal: str, exit_reason: str,
               pnl_usd: float, entry_price: float, exit_price: float,
-              hold_sec: int, rsi_at_entry: float = 0, rsi_at_exit: float = 0) -> None:
+              hold_sec: int, rsi_at_entry: float = 0, rsi_at_exit: float = 0,
+              entry_score: float = -1.0) -> None:
     record = {
         "type": "trade",
         "ts": time.time(),
@@ -40,6 +41,7 @@ def log_trade(symbol: str, side: str, entry_signal: str, exit_reason: str,
         "hold_sec": hold_sec,
         "rsi_at_entry": round(rsi_at_entry, 1),
         "rsi_at_exit": round(rsi_at_exit, 1),
+        "entry_score": round(float(entry_score), 2),  # D-045: signal strength for WR-by-band test (-1.0 = unknown)
     }
     try:
         with open(TRADE_LOG, "a", encoding="utf-8") as f:
