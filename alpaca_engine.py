@@ -77,6 +77,16 @@ SENTINEL_OVERRIDE_FILE = os.path.join(_BASE, "alpaca_sentinel_override.json")
 # tradable — no latch, no operator re-arm (mirrors zerobot D-031).
 _ACCOUNT_BLOCK_COOLDOWN_SEC = 1800  # 30 min
 
+# ── Late-session entry cutoff (NEAR-EOD GUARD, 2026-06-23, D-approved) ───────
+# Block OPENING new positions after this ET wall-clock time. ~5 min ahead of
+# the 15:50 EOD-decision window (alpaca_eod_posture.is_eod_decision_window) and
+# ~10 min ahead of the 15:55 PDT/force-flat corner. Prevents late entries that
+# either churn (immediate flatten) or roll overnight unintentionally (can't
+# flatten in the final 5 min + PDT block on sub-$25k accounts). Exits and
+# EOD-flatten are NOT affected — this gate lives only in the BUY-candidate loop.
+# Revert: set to "16:00" (== close) to disable, or comment the guard block.
+NO_ENTRY_AFTER_ET = "15:45"
+
 
 def _acct_flags_blocked(account) -> bool:
     return bool(getattr(account, "trading_blocked", False)
@@ -1007,6 +1017,21 @@ def _run_cycle(st, cycle: int) -> None:
             break
         if not entry_ok:
             break
+        # NEAR-EOD GUARD (2026-06-23): block NEW entries after NO_ENTRY_AFTER_ET (ET).
+        # Reuses alpaca_market_sense._et_now() — same clock as is_eod_decision_window.
+        # Affects ONLY opening positions; exits + EOD flatten run elsewhere.
+        try:
+            from alpaca_market_sense import _et_now as _ms_et_now_entry
+            _et_entry = _ms_et_now_entry()
+            _cut_h, _cut_m = (int(x) for x in NO_ENTRY_AFTER_ET.split(":"))
+            if (_et_entry.hour * 60 + _et_entry.minute) >= (_cut_h * 60 + _cut_m):
+                log.info("[CYCLE %d] %s SKIP near_eod_cutoff (et=%s >= %s)",
+                         cycle, sym, _et_entry.strftime("%H:%M"), NO_ENTRY_AFTER_ET)
+                continue
+        except Exception as _cut_ex:
+            # Fail-OPEN: never let a clock parse error halt trading or block a sell.
+            log.warning("[CYCLE %d] near_eod_cutoff check error (fail-open): %s",
+                        cycle, _cut_ex)
         # A7: market_sense composite gate — market hours, lunch chop,
         # SPY drift, force-flat window. Earnings stub.
         _ms = _market_sense_allow_entry(sym, spy_pct_today=_spy_pct_today)
