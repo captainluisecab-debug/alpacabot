@@ -727,7 +727,13 @@ def _run_cycle(st, cycle: int) -> None:
             st.breakeven_armed.add(sym)
             log.info("[CYCLE %d] %s profit-lock ARMED: pnl=%.1f%% — breakeven stop locked until exit",
                      cycle, sym, _pnl_now)
-        _eff_stop = BREAKEVEN_STOP_PCT if sym in st.breakeven_armed else stop_loss
+        # F-2 (2026-06-28): breakeven 0.1% floor RETIRED. The trail-from-peak in
+        # compute_signal (alpaca_strategy.py:111-123) already governs armed winners
+        # and always sits above breakeven, so this floor was dead weight whose only
+        # possible effect was to re-introduce the +8.6%->$0 strangle. Configured
+        # stop_loss is now the sole hard floor for armed positions; the trail does
+        # the profit-lock. breakeven_armed is retained (EOD-posture carry uses it).
+        _eff_stop = stop_loss
 
         # TP stays at configured level — let winners run.
         # Breakeven stop already protects capital; lowering TP kills runners.
