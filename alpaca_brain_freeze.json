@@ -1,0 +1,21 @@
+{
+  "FROZEN": true,
+  "frozen_at": "2026-07-10T03:49:22.558587Z",
+  "locked_spec": {
+    "TRADE_SIZE_USD": 180.0,
+    "STOP_LOSS_PCT": 5.0,
+    "TAKE_PROFIT_PCT": 10.0,
+    "MAX_POSITIONS": 4,
+    "MIN_SCORE_TO_TRADE": 50.0
+  },
+  "rationale": {
+    "STOP_LOSS_PCT": "5.0 = launch config (.env + earliest override agree); never drifted",
+    "TAKE_PROFIT_PCT": "10.0 = launch config, corroborated by winners exiting via take_profit 10-12%; lets trend winners run",
+    "TRADE_SIZE_USD": "180 = deliberate .env baseline (effective size scales down via sizing formula)",
+    "MAX_POSITIONS": "4 = deliberate .env value; modest diversification on a small account",
+    "MIN_SCORE_TO_TRADE": "50 = un-jammed from drifted 93 so trades flow + the clean proof accrues n"
+  },
+  "clean_proof_start_ts": 1783655362.5585866,
+  "clean_proof_start_trade_index": 105,
+  "note": "D-092: freezes alpaca self-adaptation for a clean D-056 proof. FROZEN:false + restart resumes adapting."
+}

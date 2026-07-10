@@ -12,6 +12,20 @@ log = logging.getLogger("alpaca_brain")
 BRAIN_EVERY_CYCLES = 10
 OVERRIDES_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_overrides.json")
 DECISIONS_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_decisions.jsonl")
+FREEZE_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpaca_brain_freeze.json")
+
+
+def _is_frozen() -> bool:
+    """D-092 clean-proof freeze. True => skip ALL adaptation (Opus review, local rules,
+    escalations); the engine keeps reading the LOCKED alpaca_brain_overrides.json each cycle.
+    Fail-CLOSED: freeze file exists-but-unreadable -> treated as frozen (keep the locked spec,
+    never silently resume drifting). Absent -> not frozen (normal adaptation)."""
+    if not os.path.exists(FREEZE_FILE):
+        return False
+    try:
+        return bool(json.load(open(FREEZE_FILE)).get("FROZEN", False))
+    except Exception:
+        return True
 
 PARAM_BOUNDS = {
     "STOP_LOSS_PCT":      (2.5, 8.0),
@@ -55,6 +69,8 @@ def run_brain(state, cycle: int, positions_summary: str) -> Optional[dict]:
     Run brain cycle. Returns new overrides dict or None if no changes.
     Only runs every BRAIN_EVERY_CYCLES cycles.
     """
+    if _is_frozen():   # D-092: adaptation frozen for the clean proof — trade the locked spec, unchanged
+        return None
     if cycle % BRAIN_EVERY_CYCLES != 0:
         return None
 
@@ -272,6 +288,8 @@ Only include parameters that need changing. Empty changes={{}} means no change n
 
 def check_escalations(state, cycle: int):
     """Check for Opus responses and escalate roadblocks to Opus."""
+    if _is_frozen():   # D-092: no escalation-driven param writes while frozen
+        return
     try:
         from escalation_client import RoadblockDetector, write_escalation, read_response, apply_response
         if not hasattr(check_escalations, "_detector"):
