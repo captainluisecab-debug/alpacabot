@@ -1,137 +1,107 @@
 {
-  "ts": "2026-06-03T15:58:46",
+  "ts": "2026-07-15T15:55:05",
   "lookback_days": 14,
-  "total_trades": 22,
-  "total_pnl": 13.37,
-  "overall_win_rate": 72.7,
+  "total_trades": 30,
+  "total_pnl": 4.74,
+  "overall_win_rate": 56.7,
   "per_symbol_quality": {
-    "AMZN": {
+    "MSFT": {
+      "count": 5,
+      "avg_pnl": 0.08,
+      "win_rate": 40.0,
+      "total_pnl": 0.41,
+      "score_adjustment": 0.0
+    },
+    "QQQ": {
       "count": 3,
-      "avg_pnl": -0.15,
+      "avg_pnl": -0.23,
       "win_rate": 66.7,
-      "total_pnl": -0.45,
+      "total_pnl": -0.7,
+      "score_adjustment": 0.0
+    },
+    "AMZN": {
+      "count": 5,
+      "avg_pnl": -0.11,
+      "win_rate": 20.0,
+      "total_pnl": -0.54,
+      "score_adjustment": -0.03
+    },
+    "AAPL": {
+      "count": 6,
+      "avg_pnl": 0.73,
+      "win_rate": 83.3,
+      "total_pnl": 4.38,
+      "score_adjustment": 0.37
+    },
+    "SPY": {
+      "count": 6,
+      "avg_pnl": 0.01,
+      "win_rate": 66.7,
+      "total_pnl": 0.06,
       "score_adjustment": 0.0
     },
     "TSLA": {
-      "count": 4,
-      "avg_pnl": -0.07,
-      "win_rate": 50.0,
-      "total_pnl": -0.3,
-      "score_adjustment": 0.0
+      "count": 2,
+      "avg_pnl": -0.54,
+      "win_rate": 0.0,
+      "total_pnl": -1.08,
+      "score_adjustment": -0.16
     },
     "NVDA": {
-      "count": 1,
-      "avg_pnl": -2.55,
-      "win_rate": 0.0,
-      "total_pnl": -2.55,
-      "score_adjustment": 0.0
-    },
-    "SPY": {
-      "count": 5,
-      "avg_pnl": 0.32,
+      "count": 3,
+      "avg_pnl": 0.74,
       "win_rate": 100.0,
-      "total_pnl": 1.61,
-      "score_adjustment": 0.16
-    },
-    "QQQ": {
-      "count": 1,
-      "avg_pnl": 0.43,
-      "win_rate": 100.0,
-      "total_pnl": 0.43,
-      "score_adjustment": 0.0
-    },
-    "MSFT": {
-      "count": 4,
-      "avg_pnl": 2.55,
-      "win_rate": 75.0,
-      "total_pnl": 10.22,
-      "score_adjustment": 1.28
-    },
-    "AMD": {
-      "count": 4,
-      "avg_pnl": 1.1,
-      "win_rate": 75.0,
-      "total_pnl": 4.41,
-      "score_adjustment": 0.55
+      "total_pnl": 2.21,
+      "score_adjustment": 0.37
     }
   },
   "entry_signal_quality": {
-    "trader_primary_buy: breakout_long@0.55": {
-      "count": 6,
-      "avg_pnl": 2.41,
-      "win_rate": 100.0
-    },
     "trader_primary_buy: bullish_continuation@0.62": {
-      "count": 16,
-      "avg_pnl": -0.07,
-      "win_rate": 62.5
+      "count": 25,
+      "avg_pnl": 0.02,
+      "win_rate": 52.0
+    },
+    "trader_primary_buy: breakout_long@0.55": {
+      "count": 5,
+      "avg_pnl": 0.83,
+      "win_rate": 80.0
     }
   },
   "exit_reason_quality": {
-    "trail_stop_mid (peak +2.0%, floor +1.0%, now 0.8%)": {
+    "eod_posture_flatten": {
+      "count": 24,
+      "avg_pnl": -0.03,
+      "win_rate": 50.0
+    },
+    "take_profit 10.1%": {
       "count": 1,
-      "avg_pnl": 0.49,
+      "avg_pnl": 3.2,
       "win_rate": 100.0
     },
-    "trail_stop_hi (peak +4.0%, floor +2.4%, now 2.1%)": {
+    "stop_loss -3.5%": {
       "count": 1,
-      "avg_pnl": 1.32,
-      "win_rate": 100.0
-    },
-    "stop_loss -2.5%": {
-      "count": 1,
-      "avg_pnl": -2.55,
+      "avg_pnl": -1.05,
       "win_rate": 0.0
     },
-    "eod_posture_flatten": {
-      "count": 10,
-      "avg_pnl": 0.09,
-      "win_rate": 80.0
-    },
-    "quick_profit_hitrun pnl=0.89% hold=503s": {
+    "trail_stop_hi (peak +3.4%, floor +2.0%, now 1.9%)": {
       "count": 1,
-      "avg_pnl": 0.9,
+      "avg_pnl": 0.57,
       "win_rate": 100.0
     },
-    "trail_stop_hi (peak +9.3%, floor +5.6%, now 5.4%)": {
+    "quick_profit_hitrun pnl=0.70% hold=470s": {
       "count": 1,
-      "avg_pnl": 3.29,
+      "avg_pnl": 0.6,
       "win_rate": 100.0
     },
-    "trail_stop_mid (peak +2.3%, floor +1.2%, now 1.1%)": {
-      "count": 1,
-      "avg_pnl": 0.67,
-      "win_rate": 100.0
-    },
-    "trail_stop_mid (peak +2.5%, floor +1.3%, now 1.3%)": {
+    "quick_profit_hitrun pnl=0.79% hold=574s": {
       "count": 1,
       "avg_pnl": 0.81,
       "win_rate": 100.0
     },
-    "trail_stop_hi (peak +5.9%, floor +3.5%, now 3.4%)": {
+    "trail_stop_mid (peak +3.0%, floor +1.5%, now 1.3%)": {
       "count": 1,
-      "avg_pnl": 2.06,
+      "avg_pnl": 1.29,
       "win_rate": 100.0
-    },
-    "stop_loss -3.1%": {
-      "count": 1,
-      "avg_pnl": -1.99,
-      "win_rate": 0.0
-    },
-    "take_profit 10.6%": {
-      "count": 1,
-      "avg_pnl": 10.8,
-      "win_rate": 100.0
-    },
-    "stop_loss -2.7%": {
-      "count": 1,
-      "avg_pnl": -1.75,
-      "win_rate": 0.0
-    },
-    "stop_loss -2.6%": {
-      "count": 1,
-      "avg_pnl": -1.6,
-      "win_rate": 0.0
     }
   },
   "recommended_blocks": []

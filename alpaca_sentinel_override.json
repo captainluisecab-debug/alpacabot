@@ -1,0 +1,10 @@
+{
+  "ts": "2026-06-25T23:50:41.225393+00:00",
+  "ttl_expiry": "2026-06-26T01:50:41.225406+00:00",
+  "reason": "B12-alpaca: 5-loss streak (total $-2.60) \u2192 deploy=0.25, score>=88, AAPL COOLDOWN 4h",
+  "source": "opus_sentinel",
+  "trigger": "B12_alpaca_loss_streak_universe",
+  "changes": {
+    "MIN_SCORE_TO_TRADE": 88.0
+  }
+}

@@ -390,6 +390,23 @@ def _run_cycle(st, cycle: int) -> None:
     elif sup_mode == "SCOUT":
         size_mult = min(size_mult, 0.5)
 
+    # ── PROOF PIN (P0.1, 2026-07-15, two-key operator-approved) ──────────────
+    # WHY: the governor scaled this sleeve's exposure without a key being turned —
+    # size_mult drifted 0.24 -> 0.5 -> 0.80 (trade size ~$30 floor -> $68-170, ~5.7x;
+    # max deployment ~12% -> ~64% of equity) DURING the proof window, while the trade
+    # log was reporting the wrong sign (broker +$2.49 vs log -$0.30). §0 #1: never
+    # scale capital before the proof bar clears. This is a CAP, not a freeze:
+    #   - the governor can still throttle DOWN below the cap (protection intact)
+    #   - DEFENSE can still halt entries entirely (protection intact)
+    #   - it can no longer scale UP without a two-key decision
+    # Pairs with R-denomination (P1.3), which makes the proof metric size-invariant.
+    # REMOVE ONLY by explicit two-key decision. Revert = delete this block (<2 min).
+    PROOF_SIZE_MULT_CAP = 0.25
+    if size_mult > PROOF_SIZE_MULT_CAP:
+        log.info("[CYCLE %d] [PROOF-PIN] size_mult %.2f -> capped %.2f (P0.1)",
+                 cycle, size_mult, PROOF_SIZE_MULT_CAP)
+    size_mult = min(size_mult, PROOF_SIZE_MULT_CAP)
+
     # Governor FORCE_FLATTEN: close all positions immediately
     if force_flatten and st.positions:
         log.warning("[CYCLE %d] GOVERNOR FORCE_FLATTEN: closing %d positions", cycle, len(st.positions))

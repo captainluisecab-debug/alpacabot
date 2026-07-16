@@ -23,7 +23,31 @@
     "trigger": "B12_alpaca_loss_streak_universe",
     "set_at": "2026-05-19T14:31:11.375306+00:00"
   },
+  "AAPL": {
+    "status": "COOLDOWN",
+    "size_multiplier": 0.0,
+    "ttl_ts": "2026-06-26T17:50:47.454825+00:00",
+    "reason": "B12-alpaca: 5-loss streak, last losing ticker",
+    "trigger": "B12_alpaca_loss_streak_universe",
+    "set_at": "2026-06-26T13:50:47.454833+00:00"
+  },
+  "AMD": {
+    "status": "DISABLED_SOFT",
+    "size_multiplier": 0.0,
+    "ttl_ts": "2026-09-25T00:00:00+00:00",
+    "reason": "Operator capital-protection: AMD chop 37% WR (7/19), +$0.21/19 all-time, -$1.62/14d, 3 losses 2026-06-25; block until edge re-validated",
+    "trigger": "operator_capital_protection",
+    "set_at": "2026-06-25T23:21:00+00:00"
+  },
+  "AMZN": {
+    "status": "COOLDOWN",
+    "size_multiplier": 0.0,
+    "ttl_ts": "2026-07-09T15:51:35.779683+00:00",
+    "reason": "B12-alpaca: 4-loss streak, last losing ticker",
+    "trigger": "B12_alpaca_loss_streak_universe",
+    "set_at": "2026-07-09T11:51:35.779692+00:00"
+  },
   "_meta": {
-    "last_update": "2026-05-19T14:31:11.375308+00:00"
+    "last_update": "2026-07-09T11:51:35.779695+00:00"
   }
 }

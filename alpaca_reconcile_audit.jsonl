@@ -1,0 +1,8 @@
+{"ts": 1781098205, "cycle": 13631, "sym": "AMD", "action": "ADOPTED", "entry_price": 512.654, "qty": 0.120490623, "usd_invested": 61.77, "corroboration": "corroborated(vwap=$512.65)"}
+{"ts": 1781098206, "cycle": 13631, "sym": "QQQ", "action": "ADOPTED", "entry_price": 717.87, "qty": 0.141891986, "usd_invested": 101.86, "corroboration": "corroborated(vwap=$717.87)"}
+{"ts": 1781144939, "cycle": 1, "sym": "AMD", "action": "ADOPTED", "entry_price": 512.65, "qty": 0.1205, "usd_invested": 61.77, "corroboration": "no_fills"}
+{"ts": 1781144939, "cycle": 3, "sym": "QQQ", "action": "DROP_LOCAL", "age_sec": 1781144938}
+{"ts": 1781144939, "cycle": 4, "sym": "TINY", "action": "DUST_SKIP", "qty": 0.0001, "notional": 0.0}
+{"ts": 1781144939, "cycle": 5, "sym": "BAD", "action": "FLAG_NO_BASIS", "fills": "no_fills"}
+{"ts": 1781144939, "cycle": 6, "sym": "QQQ", "action": "ADOPTED", "entry_price": 717.87, "qty": 0.1419, "usd_invested": 101.86, "corroboration": "corroborated(vwap=$718.00)"}
+{"ts": 1781144939, "cycle": 7, "sym": "NVDA", "action": "ADOPTED", "entry_price": 200.0, "qty": 1.0, "usd_invested": 200.0, "corroboration": "diverged(vwap=$999.00_vs_avg=$200.00)"}
