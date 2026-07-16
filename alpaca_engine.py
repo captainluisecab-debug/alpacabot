@@ -391,15 +391,27 @@ def _run_cycle(st, cycle: int) -> None:
         size_mult = min(size_mult, 0.5)
 
     # ── PROOF PIN (P0.1, 2026-07-15, two-key operator-approved) ──────────────
-    # WHY: the governor scaled this sleeve's exposure without a key being turned —
-    # size_mult drifted 0.24 -> 0.5 -> 0.80 (trade size ~$30 floor -> $68-170, ~5.7x;
-    # max deployment ~12% -> ~64% of equity) DURING the proof window, while the trade
-    # log was reporting the wrong sign (broker +$2.49 vs log -$0.30). §0 #1: never
-    # scale capital before the proof bar clears. This is a CAP, not a freeze:
+    # WHY: the supervisor governor scaled this sleeve's exposure with NO key turned, DURING the
+    # proof window — size_mult drifted 0.24 -> 0.80 (still commanding 0.80 at 2026-07-16 open).
+    # Same-basis effect (verified by the Fable 100% audit): at a fixed brain_mult, 0.24 -> 0.80
+    # moves MAX deployment 19% -> 64% of equity = 3.33x. §0 #1: never scale capital before the
+    # proof bar clears. This is a CAP, not a freeze:
     #   - the governor can still throttle DOWN below the cap (protection intact)
     #   - DEFENSE can still halt entries entirely (protection intact)
     #   - it can no longer scale UP without a two-key decision
-    # Pairs with R-denomination (P1.3), which makes the proof metric size-invariant.
+    # At the pinned 0.25: max deployment 4 x ~$53 = ~$213 = ~20% of a ~$1,065 account.
+    #
+    # CORRECTION (D-106, honest history — do NOT re-import the originals): the first version of
+    # this comment said "~5.7x" and "the trade log was reporting the wrong sign (broker +$2.49
+    # vs log -$0.30)". BOTH were Claude errors. (1) 5.7x mixed two different brain states on one
+    # axis (the L-041 mixed-basis shape); the governor's own contribution is 3.33x. (2) The
+    # "wrong sign" claim was RETRACTED: the log reconciles with the broker to the penny (n=16,
+    # +$2.48, PF 3.00 vs broker 16/+$2.49) — it was a stale-window comparison (07-14 reading vs
+    # 07-15 export). The drift and the need for this pin are real; those two figures were not.
+    #
+    # Pairs with R-denomination (unbuilt): the $/trade bar is not size-invariant — half of why
+    # the alpaca proof clock is now formally STOPPED (D-109; the other half is the seen-data-
+    # fitted selector in alpaca_trader.SYMBOL_CONFIG). This pin bounds exposure while stopped.
     # REMOVE ONLY by explicit two-key decision. Revert = delete this block (<2 min).
     PROOF_SIZE_MULT_CAP = 0.25
     if size_mult > PROOF_SIZE_MULT_CAP:
@@ -458,6 +470,32 @@ def _run_cycle(st, cycle: int) -> None:
             log.info("[CYCLE %d] Supervisor NORMAL for %dm < %dm required — entries blocked until stable",
                      cycle, int(_mode_stable_sec // 60), int(_SUP_MODE_MIN_STABLE_SEC // 60))
         entry_ok = False if sup_mode != "NORMAL" else (entry_ok and _mode_stable_sec >= _SUP_MODE_MIN_STABLE_SEC)
+
+    # ── D-110 ENTRY HALT (2026-07-16, two-key operator-approved) ─────────────
+    # WHY: alpaca's entry layer was measured DEAD end-to-end on 2026-07-16 — every state in
+    # ALLOW_STATES. breakout_long: OOS n=573 -> excess -0.019%/trade, t=-0.42, CI [-0.11%,+0.07%]
+    # (the in-sample +0.467% at n=20 fell OUTSIDE that CI — small-sample + multiple-testing
+    # inflation, ~25x). bullish_continuation (15 of the 16 "clean" trades): +0.018%, t=0.13,
+    # beta-controlled. Exits cannot rescue a no-edge entry — by optional stopping, no stopping rule
+    # extracts expectancy from a martingale; the realized P&L was market BETA plus variance, minus
+    # spread. Operator + Claude stopped the income pursuit: D-110 in handoff/_decision_log.md.
+    #
+    # WHY IT LIVES HERE AND NOT IN alpaca_cmd.json: the governor OWNS that file and rewrites
+    # entry_allowed=true every cycle (observed 2026-07-16 11:20 local). A command-file halt would be
+    # silently reverted — the exact L-042 shape (a flag that looks set and does nothing). This pin
+    # sits downstream of ALL upstream entry_ok logic (:385 cmd, :389 DEFENSE, :472 stability), so
+    # nothing can re-enable it. Same reasoning as the P0.1 sizing pin above.
+    #
+    # SCOPE: NEW ENTRIES ONLY. Exits, EOD posture flatten, stops and trails are untouched BY DESIGN
+    # — open positions must still close normally.
+    # REVERSAL: set False — permitted ONLY under D-110's reversal criteria (a materially different
+    # opportunity set), NOT for another idea, a tweaked threshold, or a lower bar.
+    D110_ENTRY_HALT = True
+    if D110_ENTRY_HALT:
+        if entry_ok:
+            log.warning("[CYCLE %d] [D110-HALT] new entries permanently halted — income pursuit "
+                        "stopped (entry layer measured zero edge: OOS n=573, t=-0.42)", cycle)
+        entry_ok = False
 
     # ── Account info ────────────────────────────────────────────────
     # Fetched BEFORE market-closed check so canonical state fields stay fresh
